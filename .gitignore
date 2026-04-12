@@ -1,0 +1,37 @@
+# Gizli bilgiler
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Uygulama çalışma dizinleri
+uploads/
+workdir/
+outputs/
+
+# Veritabanı
+storage/meetings.db
+storage/*.db
+
+# Model cache
+*.bin
+*.safetensors
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db

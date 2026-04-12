@@ -1,0 +1,588 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Toplantı Notları</title>
+<style>
+  /* ── Reset & Temel ── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --accent:    #4f46e5;
+    --accent-lt: #ede9fe;
+    --success:   #16a34a;
+    --error:     #dc2626;
+    --warn:      #d97706;
+    --bg:        #f8f8fc;
+    --card:      #ffffff;
+    --border:    #e4e4f0;
+    --text:      #1a1a2e;
+    --muted:     #6b7280;
+    --radius:    10px;
+    --shadow:    0 2px 12px rgba(79,70,229,.08);
+  }
+
+  body {
+    font-family: 'Segoe UI', system-ui, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+
+  /* ── Header ── */
+  header {
+    background: var(--accent);
+    color: #fff;
+    padding: 1rem 2rem;
+    display: flex;
+    align-items: center;
+    gap: .75rem;
+    box-shadow: 0 2px 8px rgba(79,70,229,.3);
+  }
+  header h1 { font-size: 1.25rem; font-weight: 700; letter-spacing: -.01em; }
+  header .subtitle { font-size: .8rem; opacity: .8; }
+
+  /* ── Layout ── */
+  main {
+    max-width: 860px;
+    margin: 2rem auto;
+    padding: 0 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 2rem;
+  }
+
+  /* ── Card ── */
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 1.5rem;
+  }
+  .card-title {
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 1.2rem;
+  }
+
+  /* ── Sekmeler ── */
+  .tabs { display: flex; gap: 0; margin-bottom: 1.2rem; border-radius: 8px; overflow: hidden; border: 1px solid var(--border); }
+  .tab-btn {
+    flex: 1;
+    padding: .6rem 1rem;
+    background: #fff;
+    border: none;
+    cursor: pointer;
+    font-size: .9rem;
+    font-weight: 500;
+    color: var(--muted);
+    transition: background .15s, color .15s;
+  }
+  .tab-btn.active {
+    background: var(--accent);
+    color: #fff;
+  }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  /* ── Drag-drop upload ── */
+  .dropzone {
+    border: 2px dashed var(--border);
+    border-radius: var(--radius);
+    padding: 2.5rem 1rem;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color .2s, background .2s;
+    background: var(--bg);
+    position: relative;
+  }
+  .dropzone:hover, .dropzone.dragover {
+    border-color: var(--accent);
+    background: var(--accent-lt);
+  }
+  .dropzone input[type=file] {
+    position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
+  }
+  .dropzone .dz-icon { font-size: 2.5rem; margin-bottom: .5rem; }
+  .dropzone .dz-hint { font-size: .85rem; color: var(--muted); margin-top: .3rem; }
+  .dropzone .dz-filename {
+    margin-top: .75rem;
+    font-size: .9rem;
+    color: var(--accent);
+    font-weight: 600;
+    display: none;
+  }
+
+  /* ── Input ── */
+  .input-group { display: flex; flex-direction: column; gap: .4rem; }
+  .input-group label { font-size: .85rem; font-weight: 600; color: var(--muted); }
+  .input-group input[type=text] {
+    padding: .65rem .9rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: .95rem;
+    outline: none;
+    transition: border-color .15s;
+    width: 100%;
+  }
+  .input-group input[type=text]:focus { border-color: var(--accent); }
+
+  /* ── Buton ── */
+  .btn {
+    display: inline-flex; align-items: center; gap: .45rem;
+    padding: .65rem 1.4rem;
+    border: none; border-radius: 8px;
+    font-size: .95rem; font-weight: 600;
+    cursor: pointer; transition: opacity .15s, transform .1s;
+  }
+  .btn:active { transform: scale(.97); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover:not(:disabled) { opacity: .88; }
+  .btn-success { background: var(--success); color: #fff; }
+  .btn-success:hover:not(:disabled) { opacity: .88; }
+  .btn-danger  { background: var(--error); color: #fff; font-size: .82rem; padding: .35rem .8rem; }
+  .btn-outline {
+    background: #fff; color: var(--accent);
+    border: 1.5px solid var(--accent);
+    font-size: .82rem; padding: .35rem .8rem;
+  }
+  .submit-row { margin-top: 1.2rem; }
+
+  /* ── İlerleme ── */
+  #progress-section { display: none; }
+  .progress-box {
+    display: flex; align-items: center; gap: 1rem;
+    background: var(--accent-lt);
+    border: 1px solid #c4b5fd;
+    border-radius: var(--radius);
+    padding: 1rem 1.2rem;
+  }
+  .spinner {
+    width: 22px; height: 22px;
+    border: 3px solid #c4b5fd;
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    flex-shrink: 0;
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .progress-text { font-size: .95rem; font-weight: 500; }
+  .progress-done  { background: #dcfce7; border-color: #86efac; }
+  .progress-error { background: #fee2e2; border-color: #fca5a5; }
+  .spinner.done  { border-color: #86efac; border-top-color: var(--success); }
+  .spinner.error { border-color: #fca5a5; border-top-color: var(--error); }
+
+  /* ── Arşiv ── */
+  .search-row {
+    display: flex; gap: .6rem; margin-bottom: 1rem;
+  }
+  .search-row input {
+    flex: 1;
+    padding: .55rem .85rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: .9rem;
+    outline: none;
+  }
+  .search-row input:focus { border-color: var(--accent); }
+
+  #meetings-list { display: flex; flex-direction: column; gap: .75rem; }
+
+  .meeting-item {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1rem 1.2rem;
+    background: var(--card);
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 1rem;
+    transition: box-shadow .15s;
+  }
+  .meeting-item:hover { box-shadow: var(--shadow); }
+
+  .meeting-info { flex: 1; min-width: 0; }
+  .meeting-title {
+    font-size: .98rem;
+    font-weight: 700;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .meeting-meta {
+    font-size: .78rem;
+    color: var(--muted);
+    margin-top: .25rem;
+  }
+  .speaker-chip {
+    display: inline-block;
+    background: var(--accent-lt);
+    color: var(--accent);
+    border-radius: 4px;
+    font-size: .72rem;
+    font-weight: 600;
+    padding: .1rem .4rem;
+    margin-right: .25rem;
+    margin-top: .2rem;
+  }
+  .meeting-actions { display: flex; gap: .4rem; flex-shrink: 0; align-items: flex-start; }
+
+  .empty-state {
+    text-align: center;
+    padding: 2.5rem 1rem;
+    color: var(--muted);
+    font-size: .9rem;
+  }
+  .empty-state .empty-icon { font-size: 2.5rem; display: block; margin-bottom: .5rem; }
+
+  /* ── Utility ── */
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+
+<header>
+  <span style="font-size:1.5rem">🎙️</span>
+  <div>
+    <h1>Toplantı Notları</h1>
+    <div class="subtitle">AI destekli otomatik not alma</div>
+  </div>
+</header>
+
+<main>
+
+  <!-- ══════════════════════════════════════════════
+       İŞLEM FORMU
+  ══════════════════════════════════════════════ -->
+  <div class="card">
+    <div class="card-title">📤 Yeni Toplantı İşle</div>
+
+    <div class="tabs">
+      <button class="tab-btn active" onclick="switchTab('file')">📁 Video Dosyası</button>
+      <button class="tab-btn"        onclick="switchTab('yt')">▶️ YouTube Linki</button>
+    </div>
+
+    <!-- Dosya sekmesi -->
+    <div id="tab-file" class="tab-panel active">
+      <div class="dropzone" id="dropzone">
+        <input type="file" id="file-input" accept=".mp4,.mkv,.avi,.webm">
+        <div class="dz-icon">🎬</div>
+        <div><strong>Tıkla veya sürükle bırak</strong></div>
+        <div class="dz-hint">.mp4 · .mkv · .avi · .webm — max 2 GB</div>
+        <div class="dz-filename" id="dz-filename"></div>
+      </div>
+    </div>
+
+    <!-- YouTube sekmesi -->
+    <div id="tab-yt" class="tab-panel">
+      <div class="input-group">
+        <label for="yt-url">YouTube URL</label>
+        <input type="text" id="yt-url" placeholder="https://www.youtube.com/watch?v=...">
+      </div>
+    </div>
+
+    <div class="submit-row">
+      <button class="btn btn-primary" id="start-btn" onclick="startProcessing()">
+        ⚡ İşlemi Başlat
+      </button>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════
+       İLERLEME
+  ══════════════════════════════════════════════ -->
+  <div id="progress-section" class="card">
+    <div class="card-title">⏳ İşlem Durumu</div>
+    <div class="progress-box" id="progress-box">
+      <div class="spinner" id="progress-spinner"></div>
+      <div class="progress-text" id="progress-text">Başlatılıyor…</div>
+    </div>
+    <div id="download-row" class="hidden" style="margin-top:1rem">
+      <button class="btn btn-success" id="download-btn" onclick="downloadPDF()">
+        ⬇️ PDF İndir
+      </button>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════
+       ARŞİV
+  ══════════════════════════════════════════════ -->
+  <div class="card">
+    <div class="card-title">🗂️ Toplantı Arşivi</div>
+    <div class="search-row">
+      <input type="text" id="search-input" placeholder="Toplantı ara…" oninput="searchMeetings(this.value)">
+    </div>
+    <div id="meetings-list">
+      <div class="empty-state">
+        <span class="empty-icon">📭</span>
+        Henüz toplantı kaydı yok.
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<script>
+// ══════════════════════════════════════════════════════
+// Durum değişkenleri
+// ══════════════════════════════════════════════════════
+let activeTab     = 'file';
+let currentJobId  = null;
+let currentMeetingId = null;
+let pollTimer     = null;
+
+// ══════════════════════════════════════════════════════
+// Sekme geçişi
+// ══════════════════════════════════════════════════════
+function switchTab(tab) {
+  activeTab = tab;
+  document.querySelectorAll('.tab-btn').forEach((b, i) =>
+    b.classList.toggle('active', (i === 0 ? 'file' : 'yt') === tab)
+  );
+  document.getElementById('tab-file').classList.toggle('active', tab === 'file');
+  document.getElementById('tab-yt').classList.toggle('active', tab === 'yt');
+}
+
+// ══════════════════════════════════════════════════════
+// Drag-drop
+// ══════════════════════════════════════════════════════
+const dropzone  = document.getElementById('dropzone');
+const fileInput = document.getElementById('file-input');
+const dzName    = document.getElementById('dz-filename');
+
+fileInput.addEventListener('change', () => {
+  if (fileInput.files[0]) showFileName(fileInput.files[0].name);
+});
+
+dropzone.addEventListener('dragover', e => { e.preventDefault(); dropzone.classList.add('dragover'); });
+dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
+dropzone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropzone.classList.remove('dragover');
+  const f = e.dataTransfer.files[0];
+  if (f) {
+    // DataTransfer dosyasını input'a aktar (mümkün olan tarayıcılarda)
+    try {
+      const dt = new DataTransfer();
+      dt.items.add(f);
+      fileInput.files = dt.files;
+    } catch (_) {}
+    showFileName(f.name);
+  }
+});
+
+function showFileName(name) {
+  dzName.textContent = '✅ ' + name;
+  dzName.style.display = 'block';
+}
+
+// ══════════════════════════════════════════════════════
+// İşlem başlat
+// ══════════════════════════════════════════════════════
+async function startProcessing() {
+  const btn = document.getElementById('start-btn');
+  btn.disabled = true;
+
+  // İlerleme bölümünü sıfırla
+  currentJobId     = null;
+  currentMeetingId = null;
+  clearInterval(pollTimer);
+  document.getElementById('download-row').classList.add('hidden');
+  setProgress('processing', 'Gönderiliyor…');
+  document.getElementById('progress-section').style.display = 'block';
+
+  try {
+    if (activeTab === 'file') {
+      await submitFile();
+    } else {
+      await submitYoutube();
+    }
+  } catch (err) {
+    setProgress('error', 'Gönderilemedi: ' + err.message);
+    btn.disabled = false;
+  }
+}
+
+async function submitFile() {
+  const file = fileInput.files[0];
+  if (!file) throw new Error('Lütfen bir video dosyası seçin.');
+
+  const form = new FormData();
+  form.append('file', file);
+
+  const res  = await fetch('/api/process/file', { method: 'POST', body: form });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || 'Sunucu hatası');
+
+  currentJobId = data.job_id;
+  startPolling();
+}
+
+async function submitYoutube() {
+  const url = document.getElementById('yt-url').value.trim();
+  if (!url) throw new Error('Lütfen bir YouTube URL\'si girin.');
+
+  const res  = await fetch('/api/process/youtube', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || 'Sunucu hatası');
+
+  currentJobId = data.job_id;
+  startPolling();
+}
+
+// ══════════════════════════════════════════════════════
+// Polling — her 2 saniyede durum sorgula
+// ══════════════════════════════════════════════════════
+function startPolling() {
+  setProgress('processing', 'İşlem kuyruğa alındı…');
+  pollTimer = setInterval(pollStatus, 2000);
+}
+
+async function pollStatus() {
+  if (!currentJobId) return;
+  try {
+    const res  = await fetch(`/api/status/${currentJobId}`);
+    const data = await res.json();
+
+    setProgress(data.status, data.progress);
+
+    if (data.status === 'done') {
+      clearInterval(pollTimer);
+      currentMeetingId = data.meeting_id;
+      document.getElementById('download-row').classList.remove('hidden');
+      document.getElementById('start-btn').disabled = false;
+      loadMeetings();
+    } else if (data.status === 'error') {
+      clearInterval(pollTimer);
+      setProgress('error', '❌ ' + (data.error || 'Bilinmeyen hata'));
+      document.getElementById('start-btn').disabled = false;
+    }
+  } catch (_) { /* ağ hatası — tekrar dene */ }
+}
+
+function setProgress(status, message) {
+  const box     = document.getElementById('progress-box');
+  const spinner = document.getElementById('progress-spinner');
+  const text    = document.getElementById('progress-text');
+
+  box.className     = 'progress-box' + (status === 'done' ? ' progress-done' : status === 'error' ? ' progress-error' : '');
+  spinner.className = 'spinner' + (status === 'done' ? ' done' : status === 'error' ? ' error' : '');
+  text.textContent  = message;
+}
+
+// ══════════════════════════════════════════════════════
+// PDF indir
+// ══════════════════════════════════════════════════════
+function downloadPDF() {
+  if (!currentMeetingId) return;
+  window.open(`/api/meetings/${currentMeetingId}/download`, '_blank');
+}
+
+// ══════════════════════════════════════════════════════
+// Arşiv
+// ══════════════════════════════════════════════════════
+async function loadMeetings(query = '') {
+  const url = query ? `/api/meetings?q=${encodeURIComponent(query)}` : '/api/meetings';
+  try {
+    const res  = await fetch(url);
+    const data = await res.json();
+    renderMeetings(data);
+  } catch (_) {
+    document.getElementById('meetings-list').innerHTML =
+      '<div class="empty-state"><span class="empty-icon">⚠️</span>Arşiv yüklenemedi.</div>';
+  }
+}
+
+let searchTimer = null;
+function searchMeetings(q) {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => loadMeetings(q), 350);
+}
+
+function renderMeetings(meetings) {
+  const el = document.getElementById('meetings-list');
+  if (!meetings.length) {
+    el.innerHTML = '<div class="empty-state"><span class="empty-icon">📭</span>Kayıt bulunamadı.</div>';
+    return;
+  }
+  el.innerHTML = meetings.map(m => {
+    const speakers = (m.speakers || []).map(s =>
+      `<span class="speaker-chip">${esc(s)}</span>`
+    ).join('');
+    return `
+      <div class="meeting-item">
+        <div class="meeting-info">
+          <div class="meeting-title" title="${esc(m.title)}">${esc(m.title)}</div>
+          <div class="meeting-meta">
+            📅 ${esc(m.date)} &nbsp;·&nbsp; 🕐 ${fmtDuration(m.duration)}
+            &nbsp;·&nbsp; ${m.source_type === 'youtube' ? '▶️ YouTube' : '📁 Dosya'}
+          </div>
+          ${speakers ? `<div style="margin-top:.3rem">${speakers}</div>` : ''}
+        </div>
+        <div class="meeting-actions">
+          <button class="btn btn-outline" onclick="window.open('/api/meetings/${m.id}/download','_blank')">
+            ⬇️ PDF
+          </button>
+          <button class="btn btn-danger" onclick="deleteMeeting(${m.id}, this)">
+            🗑
+          </button>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+async function deleteMeeting(id, btn) {
+  if (!confirm('Bu toplantıyı silmek istediğinizden emin misiniz?')) return;
+  btn.disabled = true;
+  try {
+    const res = await fetch(`/api/meetings/${id}`, { method: 'DELETE' });
+    if (res.ok) {
+      loadMeetings(document.getElementById('search-input').value);
+    } else {
+      alert('Silinemedi.');
+      btn.disabled = false;
+    }
+  } catch (_) {
+    alert('Bağlantı hatası.');
+    btn.disabled = false;
+  }
+}
+
+// ══════════════════════════════════════════════════════
+// Yardımcılar
+// ══════════════════════════════════════════════════════
+function esc(str) {
+  return String(str ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function fmtDuration(sec) {
+  if (!sec) return '—';
+  const s = Math.round(sec);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const r = s % 60;
+  if (h) return `${h}s ${m}d ${String(r).padStart(2,'0')}sn`;
+  if (m) return `${m}d ${String(r).padStart(2,'0')}sn`;
+  return `${r}sn`;
+}
+
+// ══════════════════════════════════════════════════════
+// Sayfa yüklenince arşivi getir
+// ══════════════════════════════════════════════════════
+loadMeetings();
+</script>
+</body>
+</html>
