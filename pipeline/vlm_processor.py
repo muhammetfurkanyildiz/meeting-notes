@@ -79,7 +79,7 @@ def _get_vlm() -> tuple:
         # Geç import: transformers ağır, sadece bu modül çağrıldığında yüklenir
         from transformers import (
             AutoProcessor,
-            Qwen2_5_VLForConditionalGeneration,
+            AutoModelForImageTextToText,
             BitsAndBytesConfig,
         )
 
@@ -109,7 +109,7 @@ def _get_vlm() -> tuple:
                 )
 
         try:
-            _vlm_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            _vlm_model = AutoModelForImageTextToText.from_pretrained(
                 config.VLM_MODEL_NAME,
                 **model_kwargs,
             )
