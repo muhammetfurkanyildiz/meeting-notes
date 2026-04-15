@@ -8,7 +8,7 @@ yt-dlp==2024.12.13
 ffmpeg-python==0.2.0
 
 # ── Speech: Transcription + Diarization ───────────────────────────────────────
-openai-whisper==20240930
+openai-whisper @ git+https://github.com/openai/whisper.git
 pyannote.audio==3.3.2
 torch==2.5.1
 torchaudio==2.5.1
