@@ -140,9 +140,18 @@ def _get_pyannote():
         try:
             _pyannote_pipeline = Pipeline.from_pretrained(
                 config.PYANNOTE_MODEL,
-                use_auth_token=config.HF_TOKEN,
+                token=config.HF_TOKEN,
             )
+            if _pyannote_pipeline is None:
+                raise DiarizationError(
+                    "Pipeline.from_pretrained() None döndürdü. "
+                    "HF_TOKEN geçersiz olabilir veya "
+                    "https://huggingface.co/pyannote/speaker-diarization-3.1 "
+                    "adresinde model kullanım koşulları kabul edilmemiş olabilir."
+                )
             _pyannote_pipeline.to(torch.device(device))
+        except DiarizationError:
+            raise
         except Exception as exc:
             raise DiarizationError(f"pyannote pipeline yüklenemedi: {exc}") from exc
         logger.info("pyannote pipeline yüklendi.")

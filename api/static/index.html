@@ -173,8 +173,16 @@
   .progress-text { font-size: .95rem; font-weight: 500; }
   .progress-done  { background: #dcfce7; border-color: #86efac; }
   .progress-error { background: #fee2e2; border-color: #fca5a5; }
-  .spinner.done  { border-color: #86efac; border-top-color: var(--success); }
-  .spinner.error { border-color: #fca5a5; border-top-color: var(--error); }
+  .spinner.done      { border-color: #86efac; border-top-color: var(--success); }
+  .spinner.error     { border-color: #fca5a5; border-top-color: var(--error); }
+  .spinner.cancelled { border-color: #d1d5db; border-top-color: var(--muted); }
+  .progress-cancelled { background: #f3f4f6; border-color: #d1d5db; }
+  .btn-cancel {
+    background: #fff; color: var(--error);
+    border: 1.5px solid var(--error);
+    font-size: .82rem; padding: .35rem .8rem;
+  }
+  .btn-cancel:hover:not(:disabled) { background: #fee2e2; }
 
   /* ── Arşiv ── */
   .search-row {
@@ -302,9 +310,12 @@
       <div class="spinner" id="progress-spinner"></div>
       <div class="progress-text" id="progress-text">Başlatılıyor…</div>
     </div>
-    <div id="download-row" class="hidden" style="margin-top:1rem">
-      <button class="btn btn-success" id="download-btn" onclick="downloadPDF()">
+    <div id="action-row" style="margin-top:1rem; display:flex; gap:.6rem; flex-wrap:wrap;">
+      <button class="btn btn-success hidden" id="download-btn" onclick="downloadPDF()">
         ⬇️ PDF İndir
+      </button>
+      <button class="btn btn-cancel hidden" id="cancel-btn" onclick="cancelJob()">
+        ✕ İptal Et
       </button>
     </div>
   </div>
@@ -392,7 +403,8 @@ async function startProcessing() {
   currentJobId     = null;
   currentMeetingId = null;
   clearInterval(pollTimer);
-  document.getElementById('download-row').classList.add('hidden');
+  document.getElementById('download-btn').classList.add('hidden');
+  document.getElementById('cancel-btn').classList.add('hidden');
   setProgress('processing', 'Gönderiliyor…');
   document.getElementById('progress-section').style.display = 'block';
 
@@ -444,6 +456,7 @@ async function submitYoutube() {
 // ══════════════════════════════════════════════════════
 function startPolling() {
   setProgress('processing', 'İşlem kuyruğa alındı…');
+  document.getElementById('cancel-btn').classList.remove('hidden');
   pollTimer = setInterval(pollStatus, 2000);
 }
 
@@ -458,12 +471,19 @@ async function pollStatus() {
     if (data.status === 'done') {
       clearInterval(pollTimer);
       currentMeetingId = data.meeting_id;
-      document.getElementById('download-row').classList.remove('hidden');
+      document.getElementById('cancel-btn').classList.add('hidden');
+      document.getElementById('download-btn').classList.remove('hidden');
       document.getElementById('start-btn').disabled = false;
       loadMeetings();
     } else if (data.status === 'error') {
       clearInterval(pollTimer);
+      document.getElementById('cancel-btn').classList.add('hidden');
       setProgress('error', '❌ ' + (data.error || 'Bilinmeyen hata'));
+      document.getElementById('start-btn').disabled = false;
+    } else if (data.status === 'cancelled') {
+      clearInterval(pollTimer);
+      document.getElementById('cancel-btn').classList.add('hidden');
+      setProgress('cancelled', 'İşlem iptal edildi.');
       document.getElementById('start-btn').disabled = false;
     }
   } catch (_) { /* ağ hatası — tekrar dene */ }
@@ -474,9 +494,30 @@ function setProgress(status, message) {
   const spinner = document.getElementById('progress-spinner');
   const text    = document.getElementById('progress-text');
 
-  box.className     = 'progress-box' + (status === 'done' ? ' progress-done' : status === 'error' ? ' progress-error' : '');
-  spinner.className = 'spinner' + (status === 'done' ? ' done' : status === 'error' ? ' error' : '');
+  const boxClass = { done: ' progress-done', error: ' progress-error', cancelled: ' progress-cancelled' };
+  const spinClass = { done: ' done', error: ' error', cancelled: ' cancelled' };
+
+  box.className     = 'progress-box' + (boxClass[status] || '');
+  spinner.className = 'spinner' + (spinClass[status] || '');
   text.textContent  = message;
+}
+
+async function cancelJob() {
+  if (!currentJobId) return;
+  const btn = document.getElementById('cancel-btn');
+  btn.disabled = true;
+  try {
+    const res = await fetch(`/api/jobs/${currentJobId}/cancel`, { method: 'POST' });
+    if (!res.ok) {
+      const data = await res.json();
+      alert(data.detail || 'İptal edilemedi.');
+      btn.disabled = false;
+    }
+    // Sonuç polling ile gelecek (status: cancelled)
+  } catch (_) {
+    alert('Bağlantı hatası.');
+    btn.disabled = false;
+  }
 }
 
 // ══════════════════════════════════════════════════════

@@ -109,6 +109,34 @@ def _delete(path: str) -> None:
 
 # ── Droplet yardımcıları ──────────────────────────────────────────────────────
 
+def _find_available_region(size_slug: str, poll_interval: int = 60) -> str:
+    """
+    Verilen boyut için DO API'yi periyodik olarak sorgular;
+    müsait bir bölge bulunana kadar poll_interval saniyede bir tekrar eder.
+    """
+    attempt = 0
+    while True:
+        attempt += 1
+        wait(f"'{size_slug}' için müsait bölgeler taranıyor… (deneme {attempt})")
+        try:
+            data = _get("/sizes?per_page=200")
+        except requests.HTTPError as exc:
+            info(f"Boyut listesi alınamadı, tekrar denenecek: {exc}")
+            time.sleep(poll_interval)
+            continue
+
+        for s in data.get("sizes", []):
+            if s["slug"] == size_slug:
+                regions = s.get("regions", [])
+                if regions:
+                    info(f"Müsait bölgeler: {', '.join(regions)}")
+                    return regions[0]
+                break  # slug bulundu ama müsait bölge yok
+
+        info(f"Henüz müsait bölge yok. {poll_interval}s sonra tekrar denenecek… (Ctrl+C ile iptal)")
+        time.sleep(poll_interval)
+
+
 def _find_droplet() -> dict | None:
     """İsme göre mevcut droplet'i bulur; yoksa None döner."""
     name = DROPLET_NAME()
@@ -157,7 +185,13 @@ def _ssh_client(ip: str) -> "paramiko.SSHClient":
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
-    pkey = paramiko.RSAKey.from_private_key_file(key_path)
+    try:
+        pkey = paramiko.Ed25519Key.from_private_key_file(key_path)
+    except Exception:
+        try:
+            pkey = paramiko.RSAKey.from_private_key_file(key_path)
+        except Exception:
+            pkey = paramiko.ECDSAKey.from_private_key_file(key_path)
 
     start = time.time()
     while True:
@@ -214,14 +248,23 @@ def cmd_create() -> dict:
         info(f"'{DROPLET_NAME()}' adında droplet zaten mevcut → {ip}")
         return existing
 
-    info(f"Bölge: {DROPLET_REGION()}  |  Boyut: {DROPLET_SIZE()}  |  Ad: {DROPLET_NAME()}")
+    size = DROPLET_SIZE()
+
+    # .env'de bölge belirtilmemişse veya "auto" ise otomatik tara
+    region = DROPLET_REGION()
+    if not region or region == "auto":
+        region = _find_available_region(size)
+        ok(f"Otomatik seçilen bölge: {C.BOLD}{region}{C.RESET}")
+    else:
+        info(f"Bölge: {region}  |  Boyut: {size}  |  Ad: {DROPLET_NAME()}")
+
     wait("Droplet oluşturuluyor…")
 
     try:
         resp = _post("/droplets", {
             "name":     DROPLET_NAME(),
-            "region":   DROPLET_REGION(),
-            "size":     DROPLET_SIZE(),
+            "region":   region,
+            "size":     size,
             "image":    "ubuntu-22-04-x64",
             "ssh_keys": [DO_SSH_KEY_ID()],
             "backups":  False,
@@ -325,6 +368,9 @@ def cmd_deploy() -> None:
         ok("SSH bağlantısı kuruldu.")
 
         # ── 1. Sistem paketleri ───────────────────────────────────────────────
+        wait("Cloud-init ve apt kilidi bekleniyor…")
+        _ssh_run(client, "cloud-init status --wait || true")
+        _ssh_run(client, "while fuser /var/lib/apt/lists/lock /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do echo 'apt kilidi bekleniyor...'; sleep 5; done")
         wait("Sistem paketleri güncelleniyor (bu 2-3 dakika sürebilir)…")
         _ssh_run(client, "DEBIAN_FRONTEND=noninteractive apt-get update -y", stream=True)
         _ssh_run(
@@ -425,10 +471,36 @@ def cmd_update() -> None:
     _ssh_run(client, f"cd /opt/meeting-notes && git pull origin {GIT_BRANCH()}", stream=True)
 
     wait("Bağımlılıklar güncelleniyor…")
+    _ssh_run(client,
+        "cd /opt/meeting-notes && venv/bin/pip install "
+        "--upgrade setuptools wheel pip",
+        stream=True)
     _ssh_run(client, "cd /opt/meeting-notes && venv/bin/pip install -r requirements.txt", stream=True)
 
     wait("Servis yeniden başlatılıyor…")
-    _ssh_run(client, "systemctl restart meeting-notes")
+    # Servis yoksa önce kur
+    _ssh_run(client, """
+if ! systemctl is-enabled meeting-notes > /dev/null 2>&1; then
+    cat > /etc/systemd/system/meeting-notes.service << 'EOF'
+[Unit]
+Description=Meeting Notes AI
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/meeting-notes
+ExecStart=/opt/meeting-notes/venv/bin/python main.py
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable meeting-notes
+fi
+systemctl restart meeting-notes
+""")
 
     time.sleep(3)
     _, out, _ = client.exec_command("systemctl is-active meeting-notes")
@@ -456,9 +528,6 @@ def cmd_logs() -> None:
 
     if not _PARAMIKO_OK:
         die("paramiko yüklü değil: pip install paramiko")
-
-    key_path = SSH_KEY_PATH()
-    pkey     = paramiko.RSAKey.from_private_key_file(key_path)
 
     client = _ssh_client(ip)
     ok("Bağlantı kuruldu. Loglar akıyor…\n")

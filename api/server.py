@@ -72,7 +72,10 @@ def startup() -> None:
 
 # ── In-memory job takibi ──────────────────────────────────────────────────────
 
-JobStatus = Literal["processing", "done", "error"]
+JobStatus = Literal["processing", "done", "error", "cancelled"]
+
+class JobCancelledError(Exception):
+    pass
 
 class Job:
     def __init__(self):
@@ -80,6 +83,11 @@ class Job:
         self.progress:   str       = "Başlatılıyor…"
         self.meeting_id: int | None = None
         self.error:      str | None = None
+        self.cancelled:  bool      = False
+
+    def check_cancelled(self) -> None:
+        if self.cancelled:
+            raise JobCancelledError("İş kullanıcı tarafından iptal edildi.")
 
 jobs: dict[str, Job] = {}
 
@@ -111,41 +119,46 @@ def _run_pipeline(job: Job, video_input, source_type: str, source_url: str | Non
     Tüm pipeline adımlarını sırayla çalıştırır.
     Her adımda job.progress güncellenir.
     Herhangi bir hata job.status = "error" yapar ve durur.
+    İptal isteği gelirse adımlar arasında JobCancelledError fırlatılır.
     """
     try:
         # ── 1. Ses işleme ─────────────────────────────────────────────────────
+        job.check_cancelled()
         job.progress = "Ses işleniyor (Whisper)…"
         logger.info("[%s] %s", id(job), job.progress)
         annotated_segments = audio_processor.process(video_input)
 
         # ── 2. Konuşmacı ayrıştırma ───────────────────────────────────────────
+        job.check_cancelled()
         job.progress = "Konuşmacılar ayrıştırılıyor…"
         logger.info("[%s] %s", id(job), job.progress)
-        # audio_processor.process() zaten diarisation + merge yapıyor;
-        # bu adım onun içinde tamamlandı. Loglama amaçlı ayrı mesaj.
 
         # VRAM'i boşalt (config.PARALLEL_AUDIO_VIDEO=False varsayımı)
         if not config.PARALLEL_AUDIO_VIDEO:
             audio_processor.unload_models()
 
         # ── 3. Görüntü analizi ────────────────────────────────────────────────
+        job.check_cancelled()
         job.progress = "Görüntüler analiz ediliyor…"
         logger.info("[%s] %s", id(job), job.progress)
         frame_results = frame_processor.process(video_input)
         frame_processor.unload_models()
 
         # ── 4. VLM ekran açıklamaları ─────────────────────────────────────────
+        job.check_cancelled()
         job.progress = "Ekranlar yorumlanıyor (VLM)…"
         logger.info("[%s] %s", id(job), job.progress)
         vlm_results = vlm_processor.process(frame_results)
         vlm_processor.unload_models()
 
         # ── 5. Birleştirme ────────────────────────────────────────────────────
+        job.check_cancelled()
         job.progress = "Ses ve görüntü birleştiriliyor…"
         logger.info("[%s] %s", id(job), job.progress)
         merged_items = merger.merge(annotated_segments, vlm_results)
 
         # ── 6. Not üretimi ────────────────────────────────────────────────────
+        job.check_cancelled()
         job.progress = "Notlar üretiliyor (Mistral)…"
         logger.info("[%s] %s", id(job), job.progress)
         notes = note_generator.generate(
@@ -156,6 +169,7 @@ def _run_pipeline(job: Job, video_input, source_type: str, source_url: str | Non
         note_generator.unload_models()
 
         # ── 7. PDF ────────────────────────────────────────────────────────────
+        job.check_cancelled()
         job.progress = "PDF oluşturuluyor…"
         logger.info("[%s] %s", id(job), job.progress)
         pdf_filename = f"{uuid.uuid4().hex[:8]}_{_safe_stem(video_input.title)}.pdf"
@@ -175,6 +189,11 @@ def _run_pipeline(job: Job, video_input, source_type: str, source_url: str | Non
         job.status     = "done"
         job.progress   = "Tamamlandı"
         logger.info("[%s] Pipeline tamamlandı — meeting_id=%d", id(job), meeting_id)
+
+    except JobCancelledError:
+        job.status   = "cancelled"
+        job.progress = "İptal edildi"
+        logger.info("[%s] İş iptal edildi.", id(job))
 
     except Exception as exc:
         job.status   = "error"
@@ -281,6 +300,19 @@ def process_youtube(
     background_tasks.add_task(_task)
     logger.info("YouTube işi başlatıldı: job_id=%s, url=%s", job_id, url)
     return {"job_id": job_id}
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+def cancel_job(job_id: str):
+    """Devam eden işi iptal eder."""
+    job = jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job bulunamadı: {job_id}")
+    if job.status != "processing":
+        raise HTTPException(status_code=409, detail=f"İş zaten tamamlanmış: {job.status}")
+    job.cancelled = True
+    logger.info("İptal isteği alındı: job_id=%s", job_id)
+    return {"cancelled": True, "job_id": job_id}
 
 
 @app.get("/api/status/{job_id}", response_model=StatusResponse)
