@@ -138,9 +138,10 @@ def _get_pyannote():
             device,
         )
         try:
+            from huggingface_hub import login
+            login(token=config.HF_TOKEN)
             _pyannote_pipeline = Pipeline.from_pretrained(
                 config.PYANNOTE_MODEL,
-                token=config.HF_TOKEN,
             )
             if _pyannote_pipeline is None:
                 raise DiarizationError(

@@ -551,6 +551,22 @@ def cmd_logs() -> None:
         client.close()
 
 
+def cmd_ssh() -> None:
+    """Droplet'e interaktif SSH bağlantısı açar."""
+    droplet = _find_droplet()
+    if not droplet:
+        die("Aktif droplet bulunamadı.")
+    ip = _droplet_ip(droplet)
+    key_path = SSH_KEY_PATH()
+    info(f"Sunucuya bağlanılıyor: {ip}")
+    import subprocess
+    subprocess.run([
+        "ssh", "-i", key_path,
+        "-o", "StrictHostKeyChecking=no",
+        f"root@{ip}"
+    ])
+
+
 # ── systemd service şablonu ───────────────────────────────────────────────────
 
 _SYSTEMD_SERVICE = """[Unit]
@@ -583,11 +599,12 @@ Komutlar:
   deploy   Sıfırdan tam kurulum yap
   update   Kodu güncelle, servisi yeniden başlat
   logs     Canlı servis loglarını izle
+  ssh      Sunucuya interaktif SSH bağlantısı aç
         """,
     )
     parser.add_argument(
         "command",
-        choices=["create", "destroy", "status", "deploy", "update", "logs"],
+        choices=["create", "destroy", "status", "deploy", "update", "logs", "ssh"],
         help="Çalıştırılacak komut",
     )
     args = parser.parse_args()
@@ -599,6 +616,7 @@ Komutlar:
         "deploy":  cmd_deploy,
         "update":  cmd_update,
         "logs":    cmd_logs,
+        "ssh":     cmd_ssh,
     }
 
     try:
