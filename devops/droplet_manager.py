@@ -109,10 +109,11 @@ def _delete(path: str) -> None:
 
 # ── Droplet yardımcıları ──────────────────────────────────────────────────────
 
-def _find_available_region(size_slugs: list[str], poll_interval: int = 15) -> tuple[str, str]:
+def _find_available_regions(size_slugs: list[str], poll_interval: int = 15) -> list[tuple[str, str]]:
     """
-    Verilen boyutları sırayla dener; müsait bölge bulunan ilk boyutu döner.
-    Returns: (size_slug, region)
+    Verilen boyutlar için DO API'den bölge listesi çeker.
+    Her boyuttaki tüm bölgeleri döner: [(size_slug, region), ...]
+    Hiç müsait yoksa poll_interval saniye bekleyip tekrar dener.
     """
     attempt = 0
     while True:
@@ -126,12 +127,17 @@ def _find_available_region(size_slugs: list[str], poll_interval: int = 15) -> tu
 
         size_map = {s["slug"]: s.get("regions", []) for s in data.get("sizes", [])}
 
+        candidates: list[tuple[str, str]] = []
         for slug in size_slugs:
             regions = size_map.get(slug, [])
             if regions:
-                ok(f"Müsait boyut: {C.BOLD}{slug}{C.RESET}  |  Bölge: {C.BOLD}{regions[0]}{C.RESET}")
-                return slug, regions[0]
-            wait(f"'{slug}' için müsait bölge yok. (deneme {attempt})")
+                for r in regions:
+                    candidates.append((slug, r))
+            else:
+                wait(f"'{slug}' için API'de müsait bölge yok. (deneme {attempt})")
+
+        if candidates:
+            return candidates
 
         info(f"Hiçbir boyut müsait değil. {poll_interval}s sonra tekrar denenecek… (Ctrl+C ile iptal)")
         time.sleep(poll_interval)
@@ -253,40 +259,64 @@ def cmd_create() -> dict:
     # .env'de bölge belirtilmemişse veya "auto" ise otomatik tara
     region = DROPLET_REGION()
     if not region or region == "auto":
-        # GPU tercih sırası: H100 → H200 (config'den gelen boyut öncelikli)
         gpu_priority = [size] if size not in ("auto", "") else []
         for fallback in ["gpu-h100x1-80gb", "gpu-h200x1-141gb"]:
             if fallback not in gpu_priority:
                 gpu_priority.append(fallback)
-        size, region = _find_available_region(gpu_priority)
+
+        while True:
+            candidates = _find_available_regions(gpu_priority)
+            for size, region in candidates:
+                wait(f"Deneniyor: {size} @ {region}…")
+                try:
+                    resp = _post("/droplets", {
+                        "name":     DROPLET_NAME(),
+                        "region":   region,
+                        "size":     size,
+                        "image":    "ubuntu-22-04-x64",
+                        "ssh_keys": [DO_SSH_KEY_ID()],
+                        "backups":  False,
+                        "ipv6":     False,
+                        "tags":     ["meeting-notes"],
+                    })
+                    ok(f"Droplet oluşturuldu: {size} @ {region}")
+                    droplet_id = resp["droplet"]["id"]
+                    info(f"Droplet ID: {droplet_id} — aktif olana kadar bekleniyor…")
+                    droplet = _wait_active(droplet_id)
+                    ip = _droplet_ip(droplet)
+                    ok(f"Droplet aktif!")
+                    info(f"IP Adresi  : {C.BOLD}{ip}{C.RESET}")
+                    info(f"Droplet ID : {droplet_id}")
+                    return droplet
+                except requests.HTTPError as exc:
+                    err(f"{size} @ {region} başarısız: {exc.response.json().get('message', exc)}")
+            info("Tüm adaylar başarısız, 15s sonra tekrar denenecek…")
+            time.sleep(15)
     else:
         info(f"Bölge: {region}  |  Boyut: {size}  |  Ad: {DROPLET_NAME()}")
+        wait("Droplet oluşturuluyor…")
+        try:
+            resp = _post("/droplets", {
+                "name":     DROPLET_NAME(),
+                "region":   region,
+                "size":     size,
+                "image":    "ubuntu-22-04-x64",
+                "ssh_keys": [DO_SSH_KEY_ID()],
+                "backups":  False,
+                "ipv6":     False,
+                "tags":     ["meeting-notes"],
+            })
+        except requests.HTTPError as exc:
+            die(f"Droplet oluşturulamadı: {exc.response.text}")
 
-    wait("Droplet oluşturuluyor…")
-
-    try:
-        resp = _post("/droplets", {
-            "name":     DROPLET_NAME(),
-            "region":   region,
-            "size":     size,
-            "image":    "ubuntu-22-04-x64",
-            "ssh_keys": [DO_SSH_KEY_ID()],
-            "backups":  False,
-            "ipv6":     False,
-            "tags":     ["meeting-notes"],
-        })
-    except requests.HTTPError as exc:
-        die(f"Droplet oluşturulamadı: {exc.response.text}")
-
-    droplet_id = resp["droplet"]["id"]
-    info(f"Droplet ID: {droplet_id} — aktif olana kadar bekleniyor…")
-    droplet = _wait_active(droplet_id)
-
-    ip = _droplet_ip(droplet)
-    ok(f"Droplet aktif!")
-    info(f"IP Adresi  : {C.BOLD}{ip}{C.RESET}")
-    info(f"Droplet ID : {droplet_id}")
-    return droplet
+        droplet_id = resp["droplet"]["id"]
+        info(f"Droplet ID: {droplet_id} — aktif olana kadar bekleniyor…")
+        droplet = _wait_active(droplet_id)
+        ip = _droplet_ip(droplet)
+        ok(f"Droplet aktif!")
+        info(f"IP Adresi  : {C.BOLD}{ip}{C.RESET}")
+        info(f"Droplet ID : {droplet_id}")
+        return droplet
 
 
 def cmd_destroy() -> None:
