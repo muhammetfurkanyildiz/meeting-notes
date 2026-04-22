@@ -96,10 +96,7 @@ def _get_vlm() -> tuple:
 
         if config.VLM_LOAD_IN_4BIT:
             if not torch.cuda.is_available():
-                logger.warning(
-                    "4-bit quantization CUDA gerektiriyor; CUDA bulunamadı. "
-                    "Quantization devre dışı bırakılıyor."
-                )
+                logger.warning("4-bit quantization CUDA gerektiriyor; devre dışı bırakılıyor.")
             else:
                 model_kwargs["quantization_config"] = BitsAndBytesConfig(
                     load_in_4bit=True,
@@ -107,6 +104,14 @@ def _get_vlm() -> tuple:
                     bnb_4bit_compute_dtype=torch.float16,
                     bnb_4bit_use_double_quant=True,
                 )
+
+        if getattr(config, "VLM_USE_FLASH_ATTN", False) and torch.cuda.is_available():
+            try:
+                model_kwargs["attn_implementation"] = "flash_attention_2"
+                logger.info("Flash Attention 2 etkinleştiriliyor.")
+            except Exception:
+                model_kwargs.pop("attn_implementation", None)
+                logger.warning("Flash Attention 2 desteklenmiyor, atlanıyor.")
 
         try:
             _vlm_model = AutoModelForImageTextToText.from_pretrained(
@@ -150,22 +155,28 @@ def process(frame_results: list[FrameResult]) -> list[VLMResult]:
     results: list[VLMResult] = []
     errors  = 0
 
-    logger.info("VLM analizi başlıyor — toplam %d frame.", total)
+    batch_size = getattr(config, "VLM_BATCH_SIZE", 1)
+    logger.info("VLM analizi başlıyor — toplam %d frame, batch_size=%d.", total, batch_size)
 
-    # Model + processor'ı döngüye girmeden yükle (ilk gecikme burada olsun)
-    _get_vlm()
+    _get_vlm()  # modeli önceden yükle
 
-    for idx, frame in enumerate(frame_results, start=1):
+    for batch_start in range(0, total, batch_size):
+        batch = frame_results[batch_start : batch_start + batch_size]
+        logger.info("VLM batch: %d-%d / %d", batch_start + 1, batch_start + len(batch), total)
 
-        # Her 10 frame'de bir ilerleme logu
-        if idx == 1 or idx % 10 == 0 or idx == total:
-            logger.info("VLM işleniyor: %d / %d", idx, total)
-
-        result = _process_single(frame)
-        if result is None:
-            errors += 1
-            continue
-        results.append(result)
+        if batch_size == 1:
+            result = _process_single(batch[0])
+            if result is None:
+                errors += 1
+            else:
+                results.append(result)
+        else:
+            batch_results = _process_batch(batch)
+            for r in batch_results:
+                if r is None:
+                    errors += 1
+                else:
+                    results.append(r)
 
     logger.info(
         "VLM analizi tamamlandı — başarılı: %d, hatalı/atlanan: %d.",
@@ -285,6 +296,101 @@ def _run_inference(image: Image.Image) -> str:
     response      = processor.decode(generated_ids, skip_special_tokens=True)
 
     return response.strip()
+
+
+@torch.inference_mode()
+def _process_batch(frames: list[FrameResult]) -> list[VLMResult | None]:
+    """
+    Birden fazla frame'i tek GPU geçişinde işler (batch inference).
+    H100 80GB VRAM ile batch_size=8-16 güvenle çalışır.
+    """
+    from qwen_vl_utils import process_vision_info
+
+    model, processor = _get_vlm()
+
+    images:      list[Image.Image] = []
+    valid_frames: list[FrameResult | None] = []
+
+    for frame in frames:
+        path = Path(frame.frame_path)
+        if not path.exists():
+            logger.warning("[%.2fs] Frame bulunamadı, atlanıyor: %s", frame.timestamp, path)
+            valid_frames.append(None)
+            images.append(None)
+            continue
+        try:
+            images.append(Image.open(path).convert("RGB"))
+            valid_frames.append(frame)
+        except Exception as exc:
+            logger.warning("[%.2fs] Görüntü açılamadı: %s — %s", frame.timestamp, path.name, exc)
+            valid_frames.append(None)
+            images.append(None)
+
+    # Geçerli frame'leri filtrele
+    valid_pairs = [(f, img) for f, img in zip(valid_frames, images) if f is not None]
+    if not valid_pairs:
+        return [None] * len(frames)
+
+    valid_frame_list, valid_images = zip(*valid_pairs)
+
+    # Her frame için mesaj oluştur
+    all_messages = [
+        [{"role": "user", "content": [
+            {"type": "image", "image": img},
+            {"type": "text",  "text": config.VLM_PROMPT},
+        ]}]
+        for img in valid_images
+    ]
+
+    texts = [
+        processor.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+        for msgs in all_messages
+    ]
+
+    all_image_inputs = []
+    for msgs in all_messages:
+        img_inputs, _ = process_vision_info(msgs)
+        if img_inputs:
+            all_image_inputs.extend(img_inputs)
+
+    try:
+        inputs = processor(
+            text=texts,
+            images=all_image_inputs if all_image_inputs else None,
+            padding=True,
+            return_tensors="pt",
+        )
+        device = next(model.parameters()).device
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+
+        output_ids = model.generate(
+            **inputs,
+            max_new_tokens=config.VLM_MAX_NEW_TOKENS,
+            do_sample=False,
+        )
+
+        responses = processor.batch_decode(
+            [out[len(inp):] for inp, out in zip(inputs["input_ids"], output_ids)],
+            skip_special_tokens=True,
+        )
+    except Exception as exc:
+        logger.warning("Batch VLM çıkarımı başarısız, teker teker deneniyor: %s", exc)
+        return [_process_single(f) for f in frames]
+
+    # Sonuçları orijinal frame sırasına göre birleştir
+    result_map: dict[int, VLMResult] = {}
+    for (frame, _), response in zip(valid_pairs, responses):
+        desc = response.strip()
+        ct   = _detect_content_type(desc)
+        result_map[id(frame)] = VLMResult(
+            timestamp=frame.timestamp,
+            frame_path=frame.frame_path,
+            description=desc,
+            extracted_text=_extract_text(desc, ct),
+            content_type=ct,
+        )
+
+    return [result_map.get(id(f)) if f is not None else None for f in valid_frames]
 
 
 # ── İçerik tipi tespiti ───────────────────────────────────────────────────────

@@ -16,6 +16,7 @@ Endpoint'ler:
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import shutil
 import time as _time
@@ -163,28 +164,53 @@ def _run_pipeline(job: Job, job_id: str, video_input, source_type: str, source_u
     job.set_step("start", "Başlatılıyor…")
 
     try:
-        # ── 1. Ses transkripti + konuşmacı ayrıştırma ────────────────────────
-        job.check_cancelled()
-        job.set_step("audio", "Ses transkripti ve konuşmacı analizi yapılıyor…")
-        logger.info("[%s] %s", id(job), job.progress)
-        annotated_segments = audio_processor.process(video_input)
+        if config.PARALLEL_AUDIO_VIDEO:
+            # ── Paralel mod: ses + görüntü eş zamanlı ────────────────────────
+            job.set_step("audio", "Ses + görüntü paralel işleniyor…")
+            logger.info("[%s] Paralel pipeline başlıyor.", id(job))
 
-        if not config.PARALLEL_AUDIO_VIDEO:
+            _audio_exc: Exception | None = None
+            _video_exc: Exception | None = None
+
+            def _audio_task():
+                return audio_processor.process(video_input)
+
+            def _video_task():
+                frames = frame_processor.process(video_input)
+                frame_processor.unload_models()
+                vlm = vlm_processor.process(frames)
+                vlm_processor.unload_models()
+                return vlm
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+                audio_fut = ex.submit(_audio_task)
+                video_fut = ex.submit(_video_task)
+                job.check_cancelled()
+                annotated_segments = audio_fut.result()
+                job.set_step("vlm", "Görüntü analizi tamamlanıyor…")
+                vlm_results = video_fut.result()
+
+            audio_processor.unload_models()
+            logger.info("[%s] Paralel pipeline tamamlandı.", id(job))
+        else:
+            # ── Sıralı mod ───────────────────────────────────────────────────
+            job.check_cancelled()
+            job.set_step("audio", "Ses transkripti ve konuşmacı analizi yapılıyor…")
+            logger.info("[%s] %s", id(job), job.progress)
+            annotated_segments = audio_processor.process(video_input)
             audio_processor.unload_models()
 
-        # ── 2. Görüntü analizi ────────────────────────────────────────────────
-        job.check_cancelled()
-        job.set_step("frames", "Görüntüler analiz ediliyor…")
-        logger.info("[%s] %s", id(job), job.progress)
-        frame_results = frame_processor.process(video_input)
-        frame_processor.unload_models()
+            job.check_cancelled()
+            job.set_step("frames", "Görüntüler analiz ediliyor…")
+            logger.info("[%s] %s", id(job), job.progress)
+            frame_results = frame_processor.process(video_input)
+            frame_processor.unload_models()
 
-        # ── 3. VLM ekran açıklamaları ─────────────────────────────────────────
-        job.check_cancelled()
-        job.set_step("vlm", "Ekranlar yorumlanıyor (VLM)…")
-        logger.info("[%s] %s", id(job), job.progress)
-        vlm_results = vlm_processor.process(frame_results)
-        vlm_processor.unload_models()
+            job.check_cancelled()
+            job.set_step("vlm", "Ekranlar yorumlanıyor (VLM)…")
+            logger.info("[%s] %s", id(job), job.progress)
+            vlm_results = vlm_processor.process(frame_results)
+            vlm_processor.unload_models()
 
         # ── 4. Birleştirme ────────────────────────────────────────────────────
         job.check_cancelled()

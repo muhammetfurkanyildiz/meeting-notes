@@ -93,24 +93,44 @@ class DiarizationError(AudioProcessorError):
 # ── Lazy-load model önbelleği ─────────────────────────────────────────────────
 # Modüler değişkenler; process boyunca sadece bir kez yüklenir.
 
-_whisper_model = None      # whisper.model.Whisper
+_whisper_model     = None  # faster_whisper.WhisperModel veya whisper.Whisper
 _pyannote_pipeline = None  # pyannote.audio.Pipeline
 
 
 def _get_whisper():
-    """Whisper modelini döner; gerekiyorsa yükler."""
+    """Whisper modelini döner; gerekiyorsa yükler. Backend config'den belirlenir."""
     global _whisper_model
     if _whisper_model is None:
-        import whisper  # geç import — ağır bağımlılık
-
         device = _resolve_device(config.WHISPER_DEVICE)
-        logger.info(
-            "Whisper '%s' modeli yükleniyor (cihaz: %s) …",
-            config.WHISPER_MODEL,
-            device,
-        )
+        backend = getattr(config, "WHISPER_BACKEND", "faster-whisper")
+
+        if backend == "faster-whisper":
+            try:
+                from faster_whisper import WhisperModel
+                compute_type = getattr(config, "WHISPER_COMPUTE_TYPE", "float16")
+                if device == "cpu":
+                    compute_type = "int8"  # CPU'da float16 desteklenmez
+                logger.info(
+                    "faster-whisper '%s' yükleniyor (cihaz: %s, compute: %s) …",
+                    config.WHISPER_MODEL, device, compute_type,
+                )
+                _whisper_model = WhisperModel(
+                    config.WHISPER_MODEL,
+                    device=device,
+                    compute_type=compute_type,
+                )
+                _whisper_model._backend = "faster-whisper"
+                logger.info("faster-whisper modeli yüklendi.")
+                return _whisper_model
+            except ImportError:
+                logger.warning("faster-whisper yüklü değil, vanilla whisper'a düşülüyor.")
+
+        # Vanilla whisper fallback
+        import whisper as _whisper
+        logger.info("Whisper '%s' yükleniyor (cihaz: %s) …", config.WHISPER_MODEL, device)
         try:
-            _whisper_model = whisper.load_model(config.WHISPER_MODEL, device=device)
+            _whisper_model = _whisper.load_model(config.WHISPER_MODEL, device=device)
+            _whisper_model._backend = "whisper"
         except Exception as exc:
             raise WhisperError(f"Whisper modeli yüklenemedi: {exc}") from exc
         logger.info("Whisper modeli yüklendi.")
@@ -220,27 +240,60 @@ def process(video_input: VideoInput) -> list[AnnotatedSegment]:
 
 def _run_whisper(audio_path: Path) -> list[TranscriptSegment]:
     """
-    Whisper Large-v3 ile ses dosyasını transkript eder.
-
-    - Dil otomatik algılanır (ilk 30 saniyelik probe).
-    - Her segment için start/end timestamp döner.
+    Ses dosyasını transkript eder.
+    faster-whisper backend varsa kullanır (~5x hız), yoksa vanilla whisper'a düşer.
     """
     model = _get_whisper()
+    backend = getattr(model, "_backend", "whisper")
+    logger.info("Transkripsiyon başlıyor [%s]: %s", backend, audio_path.name)
 
-    logger.info("Whisper transkripsiyon başlıyor: %s", audio_path.name)
+    if backend == "faster-whisper":
+        return _run_faster_whisper(model, audio_path)
+    return _run_vanilla_whisper(model, audio_path)
 
-    transcribe_kwargs: dict = {
-        "verbose": False,
-        "word_timestamps": False,   # segment-level timestamp yeterli
+
+def _run_faster_whisper(model, audio_path: Path) -> list[TranscriptSegment]:
+    """faster-whisper ile transkripsiyon — ~5x daha hızlı."""
+    kwargs: dict = {
+        "beam_size": 5,
+        "vad_filter": True,          # sessiz bölgeleri atla
+        "vad_parameters": {"min_silence_duration_ms": 500},
     }
     if config.WHISPER_LANGUAGE:
-        transcribe_kwargs["language"] = config.WHISPER_LANGUAGE
-        logger.debug("Dil sabitlendi: %s", config.WHISPER_LANGUAGE)
-    else:
-        logger.debug("Dil otomatik algılanacak.")
+        kwargs["language"] = config.WHISPER_LANGUAGE
 
     try:
-        result = model.transcribe(str(audio_path), **transcribe_kwargs)
+        seg_iter, info = model.transcribe(str(audio_path), **kwargs)
+    except Exception as exc:
+        raise WhisperError(f"faster-whisper transkripsiyon başarısız: {exc}") from exc
+
+    detected_lang = info.language
+    logger.info("Algılanan dil: %s (olasılık: %.2f)", detected_lang, info.language_probability)
+
+    segments: list[TranscriptSegment] = []
+    for seg in seg_iter:
+        text = seg.text.strip()
+        if text:
+            segments.append(TranscriptSegment(
+                start=float(seg.start),
+                end=float(seg.end),
+                text=text,
+                language=detected_lang,
+            ))
+
+    if not segments:
+        logger.warning("Transkript boş. Ses dosyası sessiz olabilir.")
+    return segments
+
+
+def _run_vanilla_whisper(model, audio_path: Path) -> list[TranscriptSegment]:
+    """Vanilla whisper ile transkripsiyon (fallback)."""
+    kwargs: dict = {"verbose": False, "word_timestamps": False}
+    if config.WHISPER_LANGUAGE:
+        kwargs["language"] = config.WHISPER_LANGUAGE
+
+    try:
+        result = model.transcribe(str(audio_path), **kwargs)
     except Exception as exc:
         raise WhisperError(f"Whisper transkripsiyon başarısız: {exc}") from exc
 
@@ -250,20 +303,16 @@ def _run_whisper(audio_path: Path) -> list[TranscriptSegment]:
     segments: list[TranscriptSegment] = []
     for seg in result.get("segments", []):
         text = seg["text"].strip()
-        if not text:
-            continue
-        segments.append(
-            TranscriptSegment(
+        if text:
+            segments.append(TranscriptSegment(
                 start=float(seg["start"]),
                 end=float(seg["end"]),
                 text=text,
                 language=detected_lang,
-            )
-        )
+            ))
 
     if not segments:
         logger.warning("Whisper hiç segment üretemedi. Ses dosyası sessiz olabilir.")
-
     return segments
 
 

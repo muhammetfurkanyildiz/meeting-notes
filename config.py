@@ -35,6 +35,8 @@ WHISPER_MODEL       = "large-v3"          # options: tiny, base, small, medium, 
 WHISPER_LANGUAGE    = None                # None → auto-detect; "tr", "en", …
 WHISPER_DEVICE      = "cuda"              # "cpu" fallback handled at runtime
 WHISPER_BATCH_SIZE  = 16                  # reduce if VRAM is tight
+WHISPER_BACKEND     = "faster-whisper"    # "faster-whisper" (önerilen) veya "whisper"
+WHISPER_COMPUTE_TYPE = "float16"          # faster-whisper için: float16 | int8_float16 | int8
 
 # pyannote speaker diarisation
 PYANNOTE_MODEL      = "pyannote/speaker-diarization-3.1"
@@ -58,10 +60,12 @@ CLIP_DEVICE       = "cuda"
 
 # ── VLM — Qwen2.5-VL (screen understanding) ──────────────────────────────────
 
-VLM_MODEL_NAME       = "Qwen/Qwen2.5-VL-7B-Instruct"
-VLM_DEVICE_MAP       = "auto"             # spreads across available GPUs/CPU
-VLM_LOAD_IN_4BIT     = True              # bitsandbytes 4-bit quantisation
-VLM_MAX_NEW_TOKENS   = 512
+VLM_MODEL_NAME         = "Qwen/Qwen2.5-VL-7B-Instruct"
+VLM_DEVICE_MAP         = "auto"           # spreads across available GPUs/CPU
+VLM_LOAD_IN_4BIT       = True             # bitsandbytes 4-bit quantisation
+VLM_MAX_NEW_TOKENS     = 512
+VLM_BATCH_SIZE         = 8               # kaç frame'i aynı anda işle (H100: 8-16)
+VLM_USE_FLASH_ATTN     = True             # Flash Attention 2 (H100/A100 gerektirir)
 VLM_PROMPT           = (
     "Bu ekran görüntüsünde ne var? Kısaca ve net açıkla.\n"
     "Eğer terminal veya komut satırı varsa komutları ve çıktıları aynen yaz.\n"
@@ -135,7 +139,7 @@ CORS_ORIGINS      = ["*"]       # tighten in production
 
 # Audio and frame pipelines run sequentially by default.
 # Set to True only if you have enough VRAM to keep all models loaded at once.
-PARALLEL_AUDIO_VIDEO = False
+PARALLEL_AUDIO_VIDEO = True
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
