@@ -285,10 +285,9 @@ def _download_video(url: str, out_dir: Path) -> tuple[Path, str, float, dict]:
     output_tmpl = str(out_dir / f"{safe_title}.%(ext)s")
 
     ydl_opts: dict = {
-        "format":           config.YTDLP_FORMAT,
-        "outtmpl":          output_tmpl,
-        "quiet":            True,
-        "no_warnings":      True,
+        **_ydlp_base_opts(),
+        "format":              config.YTDLP_FORMAT,
+        "outtmpl":             output_tmpl,
         "merge_output_format": "mp4",
     }
 
@@ -321,11 +320,19 @@ def _download_video(url: str, out_dir: Path) -> tuple[Path, str, float, dict]:
     return video_path, title, duration, meta
 
 
+def _ydlp_base_opts() -> dict:
+    """Tüm yt-dlp çağrıları için ortak seçenekler (çerez desteği dahil)."""
+    opts: dict = {"quiet": True, "no_warnings": True}
+    browser = getattr(config, "YTDLP_COOKIES_FROM_BROWSER", "")
+    if browser:
+        opts["cookiesfrombrowser"] = (browser,)
+    return opts
+
+
 def _fetch_metadata(url: str) -> dict:
     """yt-dlp ile indirme yapmadan video metadata'sını çeker."""
     ydl_opts = {
-        "quiet":        True,
-        "no_warnings":  True,
+        **_ydlp_base_opts(),
         "skip_download": True,
     }
     try:
@@ -364,13 +371,12 @@ def _try_download_sub(url: str, out_dir: Path, lang: str) -> Path | None:
     """Belirtilen dilde otomatik altyazıyı indir; bulamazsa None döner."""
     sub_tmpl = str(out_dir / "sub.%(ext)s")
     ydl_opts = {
-        "quiet":              True,
-        "no_warnings":        True,
-        "skip_download":      True,
-        "writeautomaticsub":  True,
-        "subtitleslangs":     [lang],
-        "subtitlesformat":    "vtt",
-        "outtmpl":            sub_tmpl,
+        **_ydlp_base_opts(),
+        "skip_download":     True,
+        "writeautomaticsub": True,
+        "subtitleslangs":    [lang],
+        "subtitlesformat":   "vtt",
+        "outtmpl":           sub_tmpl,
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:

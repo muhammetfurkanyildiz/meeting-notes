@@ -20,6 +20,19 @@ from typing import Generator
 import config
 from pipeline.note_generator import MeetingNotes
 
+# ── Job şeması ────────────────────────────────────────────────────────────────
+
+_CREATE_JOBS = """
+CREATE TABLE IF NOT EXISTS jobs (
+    job_id     TEXT PRIMARY KEY,
+    status     TEXT NOT NULL DEFAULT 'processing',
+    progress   TEXT NOT NULL DEFAULT 'Başlatılıyor…',
+    meeting_id INTEGER,
+    error      TEXT,
+    created_at TEXT NOT NULL
+);
+"""
+
 # ── Logger ────────────────────────────────────────────────────────────────────
 
 logger = logging.getLogger("database")
@@ -117,6 +130,7 @@ def init_db() -> None:
     with _connect() as conn:
         conn.execute(_CREATE_MEETINGS)
         conn.execute(_CREATE_FTS)
+        conn.execute(_CREATE_JOBS)
         # Trigger'ları tek tek çalıştır (executescript transaction açar, biz istemiyoruz)
         for stmt in _CREATE_TRIGGERS.strip().split("\n\n"):
             stmt = stmt.strip()
@@ -294,6 +308,39 @@ def delete_meeting(meeting_id: int) -> bool:
 
 
 # ── Yardımcı fonksiyonlar ─────────────────────────────────────────────────────
+
+def save_job(job_id: str) -> None:
+    """Yeni iş kaydı oluşturur."""
+    with _connect() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO jobs (job_id, created_at) VALUES (?, ?)",
+            (job_id, datetime.now().isoformat(timespec="seconds")),
+        )
+
+
+def update_job(
+    job_id: str,
+    status: str,
+    progress: str,
+    meeting_id: int | None = None,
+    error: str | None = None,
+) -> None:
+    """İş durumunu günceller."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE jobs SET status=?, progress=?, meeting_id=?, error=? WHERE job_id=?",
+            (status, progress, meeting_id, error, job_id),
+        )
+
+
+def get_job_status(job_id: str) -> dict | None:
+    """İş durumunu döner; bulunamazsa None."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM jobs WHERE job_id=?", (job_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
 
 def _row_to_dict(row: sqlite3.Row) -> dict:
     """sqlite3.Row → dict; speakers JSON string'ini listeye çevirir."""

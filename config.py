@@ -117,6 +117,10 @@ YTDLP_FORMAT          = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/bes
 YTDLP_USE_AUTOSUB     = True    # use YouTube auto-captions when available
 YTDLP_AUTOSUB_LANG    = "tr"    # preferred caption language; falls back to "en"
 
+# Tarayıcı adı ("chrome", "firefox", "edge", "brave", ...) veya boş bırakın.
+# Boş bırakılırsa çerez kullanılmaz.
+YTDLP_COOKIES_FROM_BROWSER = os.getenv("YTDLP_COOKIES_FROM_BROWSER", "chrome")
+
 
 # ── FastAPI / Server ──────────────────────────────────────────────────────────
 

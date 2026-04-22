@@ -30,7 +30,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import config
-from storage.database import init_db, save_meeting, get_meeting, list_meetings, search_meetings, delete_meeting
+from storage.database import (
+    init_db, save_meeting, get_meeting, list_meetings, search_meetings, delete_meeting,
+    save_job, update_job, get_job_status,
+)
 from pipeline import (
     input_handler,
     audio_processor,
@@ -96,6 +99,7 @@ def _new_job() -> tuple[str, Job]:
     job_id  = uuid.uuid4().hex
     job     = Job()
     jobs[job_id] = job
+    save_job(job_id)
     return job_id, job
 
 
@@ -114,7 +118,7 @@ class StatusResponse(BaseModel):
 
 # ── Pipeline çalıştırıcı ──────────────────────────────────────────────────────
 
-def _run_pipeline(job: Job, video_input, source_type: str, source_url: str | None = None) -> None:
+def _run_pipeline(job: Job, job_id: str, video_input, source_type: str, source_url: str | None = None) -> None:
     """
     Tüm pipeline adımlarını sırayla çalıştırır.
     Her adımda job.progress güncellenir.
@@ -122,42 +126,36 @@ def _run_pipeline(job: Job, video_input, source_type: str, source_url: str | Non
     İptal isteği gelirse adımlar arasında JobCancelledError fırlatılır.
     """
     try:
-        # ── 1. Ses işleme ─────────────────────────────────────────────────────
+        # ── 1. Ses transkripti + konuşmacı ayrıştırma ────────────────────────
         job.check_cancelled()
-        job.progress = "Ses işleniyor (Whisper)…"
+        job.progress = "Ses transkripti ve konuşmacı analizi yapılıyor…"
         logger.info("[%s] %s", id(job), job.progress)
         annotated_segments = audio_processor.process(video_input)
 
-        # ── 2. Konuşmacı ayrıştırma ───────────────────────────────────────────
-        job.check_cancelled()
-        job.progress = "Konuşmacılar ayrıştırılıyor…"
-        logger.info("[%s] %s", id(job), job.progress)
-
-        # VRAM'i boşalt (config.PARALLEL_AUDIO_VIDEO=False varsayımı)
         if not config.PARALLEL_AUDIO_VIDEO:
             audio_processor.unload_models()
 
-        # ── 3. Görüntü analizi ────────────────────────────────────────────────
+        # ── 2. Görüntü analizi ────────────────────────────────────────────────
         job.check_cancelled()
         job.progress = "Görüntüler analiz ediliyor…"
         logger.info("[%s] %s", id(job), job.progress)
         frame_results = frame_processor.process(video_input)
         frame_processor.unload_models()
 
-        # ── 4. VLM ekran açıklamaları ─────────────────────────────────────────
+        # ── 3. VLM ekran açıklamaları ─────────────────────────────────────────
         job.check_cancelled()
         job.progress = "Ekranlar yorumlanıyor (VLM)…"
         logger.info("[%s] %s", id(job), job.progress)
         vlm_results = vlm_processor.process(frame_results)
         vlm_processor.unload_models()
 
-        # ── 5. Birleştirme ────────────────────────────────────────────────────
+        # ── 4. Birleştirme ────────────────────────────────────────────────────
         job.check_cancelled()
         job.progress = "Ses ve görüntü birleştiriliyor…"
         logger.info("[%s] %s", id(job), job.progress)
         merged_items = merger.merge(annotated_segments, vlm_results)
 
-        # ── 6. Not üretimi ────────────────────────────────────────────────────
+        # ── 5. Not üretimi ────────────────────────────────────────────────────
         job.check_cancelled()
         job.progress = "Notlar üretiliyor (Mistral)…"
         logger.info("[%s] %s", id(job), job.progress)
@@ -168,7 +166,7 @@ def _run_pipeline(job: Job, video_input, source_type: str, source_url: str | Non
         )
         note_generator.unload_models()
 
-        # ── 7. PDF ────────────────────────────────────────────────────────────
+        # ── 6. PDF ────────────────────────────────────────────────────────────
         job.check_cancelled()
         job.progress = "PDF oluşturuluyor…"
         logger.info("[%s] %s", id(job), job.progress)
@@ -176,7 +174,7 @@ def _run_pipeline(job: Job, video_input, source_type: str, source_url: str | Non
         pdf_path     = str(config.OUTPUT_DIR / pdf_filename)
         pdf_generator.generate(notes, pdf_path)
 
-        # ── 8. Veritabanı ─────────────────────────────────────────────────────
+        # ── 7. Veritabanı ─────────────────────────────────────────────────────
         job.progress = "Arşive kaydediliyor…"
         meeting_id = save_meeting(
             notes=notes,
@@ -188,17 +186,20 @@ def _run_pipeline(job: Job, video_input, source_type: str, source_url: str | Non
         job.meeting_id = meeting_id
         job.status     = "done"
         job.progress   = "Tamamlandı"
+        update_job(job_id, "done", "Tamamlandı", meeting_id=meeting_id)
         logger.info("[%s] Pipeline tamamlandı — meeting_id=%d", id(job), meeting_id)
 
     except JobCancelledError:
         job.status   = "cancelled"
         job.progress = "İptal edildi"
+        update_job(job_id, "cancelled", "İptal edildi")
         logger.info("[%s] İş iptal edildi.", id(job))
 
     except Exception as exc:
         job.status   = "error"
         job.progress = "Hata oluştu"
         job.error    = str(exc)
+        update_job(job_id, "error", "Hata oluştu", error=str(exc))
         logger.error(
             "[%s] Pipeline hatası: %s\n%s",
             id(job),
@@ -263,10 +264,11 @@ async def process_file(
     def _task():
         try:
             video_input = input_handler.handle_file(tmp_path)
-            _run_pipeline(job, video_input, source_type="file")
+            _run_pipeline(job, job_id, video_input, source_type="file")
         except Exception as exc:
             job.status = "error"
             job.error  = str(exc)
+            update_job(job_id, "error", "Hata oluştu", error=str(exc))
             logger.error("Dosya pipeline başlatılamadı: %s", exc)
 
     background_tasks.add_task(_task)
@@ -291,10 +293,11 @@ def process_youtube(
     def _task():
         try:
             video_input = input_handler.handle_youtube(url)
-            _run_pipeline(job, video_input, source_type="youtube", source_url=url)
+            _run_pipeline(job, job_id, video_input, source_type="youtube", source_url=url)
         except Exception as exc:
             job.status = "error"
             job.error  = str(exc)
+            update_job(job_id, "error", "Hata oluştu", error=str(exc))
             logger.error("YouTube pipeline başlatılamadı: %s", exc)
 
     background_tasks.add_task(_task)
@@ -317,15 +320,24 @@ def cancel_job(job_id: str):
 
 @app.get("/api/status/{job_id}", response_model=StatusResponse)
 def job_status(job_id: str):
-    """İş durumunu döner."""
+    """İş durumunu döner. Bellekte yoksa DB'den alır."""
     job = jobs.get(job_id)
-    if job is None:
+    if job is not None:
+        return StatusResponse(
+            status=job.status,
+            progress=job.progress,
+            meeting_id=job.meeting_id,
+            error=job.error,
+        )
+    # Sunucu yeniden başlatılmış olabilir — DB'den kontrol et
+    db_job = get_job_status(job_id)
+    if db_job is None:
         raise HTTPException(status_code=404, detail=f"Job bulunamadı: {job_id}")
     return StatusResponse(
-        status=job.status,
-        progress=job.progress,
-        meeting_id=job.meeting_id,
-        error=job.error,
+        status=db_job["status"],
+        progress=db_job["progress"],
+        meeting_id=db_job.get("meeting_id"),
+        error=db_job.get("error"),
     )
 
 
