@@ -109,15 +109,14 @@ def _delete(path: str) -> None:
 
 # ── Droplet yardımcıları ──────────────────────────────────────────────────────
 
-def _find_available_region(size_slug: str, poll_interval: int = 60) -> str:
+def _find_available_region(size_slugs: list[str], poll_interval: int = 15) -> tuple[str, str]:
     """
-    Verilen boyut için DO API'yi periyodik olarak sorgular;
-    müsait bir bölge bulunana kadar poll_interval saniyede bir tekrar eder.
+    Verilen boyutları sırayla dener; müsait bölge bulunan ilk boyutu döner.
+    Returns: (size_slug, region)
     """
     attempt = 0
     while True:
         attempt += 1
-        wait(f"'{size_slug}' için müsait bölgeler taranıyor… (deneme {attempt})")
         try:
             data = _get("/sizes?per_page=200")
         except requests.HTTPError as exc:
@@ -125,15 +124,16 @@ def _find_available_region(size_slug: str, poll_interval: int = 60) -> str:
             time.sleep(poll_interval)
             continue
 
-        for s in data.get("sizes", []):
-            if s["slug"] == size_slug:
-                regions = s.get("regions", [])
-                if regions:
-                    info(f"Müsait bölgeler: {', '.join(regions)}")
-                    return regions[0]
-                break  # slug bulundu ama müsait bölge yok
+        size_map = {s["slug"]: s.get("regions", []) for s in data.get("sizes", [])}
 
-        info(f"Henüz müsait bölge yok. {poll_interval}s sonra tekrar denenecek… (Ctrl+C ile iptal)")
+        for slug in size_slugs:
+            regions = size_map.get(slug, [])
+            if regions:
+                ok(f"Müsait boyut: {C.BOLD}{slug}{C.RESET}  |  Bölge: {C.BOLD}{regions[0]}{C.RESET}")
+                return slug, regions[0]
+            wait(f"'{slug}' için müsait bölge yok. (deneme {attempt})")
+
+        info(f"Hiçbir boyut müsait değil. {poll_interval}s sonra tekrar denenecek… (Ctrl+C ile iptal)")
         time.sleep(poll_interval)
 
 
@@ -253,8 +253,12 @@ def cmd_create() -> dict:
     # .env'de bölge belirtilmemişse veya "auto" ise otomatik tara
     region = DROPLET_REGION()
     if not region or region == "auto":
-        region = _find_available_region(size)
-        ok(f"Otomatik seçilen bölge: {C.BOLD}{region}{C.RESET}")
+        # GPU tercih sırası: H100 → H200 (config'den gelen boyut öncelikli)
+        gpu_priority = [size] if size not in ("auto", "") else []
+        for fallback in ["gpu-h100x1-80gb", "gpu-h200x1-141gb"]:
+            if fallback not in gpu_priority:
+                gpu_priority.append(fallback)
+        size, region = _find_available_region(gpu_priority)
     else:
         info(f"Bölge: {region}  |  Boyut: {size}  |  Ad: {DROPLET_NAME()}")
 
