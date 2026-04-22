@@ -184,6 +184,29 @@
   }
   .btn-cancel:hover:not(:disabled) { background: #fee2e2; }
 
+  /* ── İlerleme çubuğu ── */
+  .progress-bar-wrap {
+    margin-top: .85rem;
+    background: #e0e7ff;
+    border-radius: 999px;
+    height: 10px;
+    overflow: hidden;
+  }
+  .progress-bar-fill {
+    height: 100%;
+    border-radius: 999px;
+    background: var(--accent);
+    transition: width .6s ease;
+    width: 0%;
+  }
+  .progress-bar-fill.done { background: var(--success); }
+  .progress-bar-fill.error { background: var(--error); }
+  .progress-meta {
+    display: flex; justify-content: space-between;
+    font-size: .78rem; color: var(--muted);
+    margin-top: .35rem;
+  }
+
   /* ── Arşiv ── */
   .search-row {
     display: flex; gap: .6rem; margin-bottom: 1rem;
@@ -310,6 +333,13 @@
       <div class="spinner" id="progress-spinner"></div>
       <div class="progress-text" id="progress-text">Başlatılıyor…</div>
     </div>
+    <div class="progress-bar-wrap" id="progress-bar-wrap">
+      <div class="progress-bar-fill" id="progress-bar-fill"></div>
+    </div>
+    <div class="progress-meta">
+      <span id="progress-pct">%0</span>
+      <span id="progress-eta"></span>
+    </div>
     <div id="action-row" style="margin-top:1rem; display:flex; gap:.6rem; flex-wrap:wrap;">
       <button class="btn btn-success hidden" id="download-btn" onclick="downloadPDF()">
         ⬇️ PDF İndir
@@ -405,7 +435,7 @@ async function startProcessing() {
   clearInterval(pollTimer);
   document.getElementById('download-btn').classList.add('hidden');
   document.getElementById('cancel-btn').classList.add('hidden');
-  setProgress('processing', 'Gönderiliyor…');
+  setProgress('processing', 'Gönderiliyor…', 0, null);
   document.getElementById('progress-section').style.display = 'block';
 
   try {
@@ -455,7 +485,7 @@ async function submitYoutube() {
 // Polling — her 2 saniyede durum sorgula
 // ══════════════════════════════════════════════════════
 function startPolling() {
-  setProgress('processing', 'İşlem kuyruğa alındı…');
+  setProgress('processing', 'İşlem kuyruğa alındı…', 0, null);
   document.getElementById('cancel-btn').classList.remove('hidden');
   pollTimer = setInterval(pollStatus, 2000);
 }
@@ -466,7 +496,7 @@ async function pollStatus() {
     const res  = await fetch(`/api/status/${currentJobId}`);
     const data = await res.json();
 
-    setProgress(data.status, data.progress);
+    setProgress(data.status, data.progress, data.percent || 0, data.eta_seconds);
 
     if (data.status === 'done') {
       clearInterval(pollTimer);
@@ -478,28 +508,52 @@ async function pollStatus() {
     } else if (data.status === 'error') {
       clearInterval(pollTimer);
       document.getElementById('cancel-btn').classList.add('hidden');
-      setProgress('error', '❌ ' + (data.error || 'Bilinmeyen hata'));
+      setProgress('error', '❌ ' + (data.error || 'Bilinmeyen hata'), 0, null);
       document.getElementById('start-btn').disabled = false;
     } else if (data.status === 'cancelled') {
       clearInterval(pollTimer);
       document.getElementById('cancel-btn').classList.add('hidden');
-      setProgress('cancelled', 'İşlem iptal edildi.');
+      setProgress('cancelled', 'İşlem iptal edildi.', 0, null);
       document.getElementById('start-btn').disabled = false;
     }
   } catch (_) { /* ağ hatası — tekrar dene */ }
 }
 
-function setProgress(status, message) {
+function setProgress(status, message, percent = 0, etaSec = null) {
   const box     = document.getElementById('progress-box');
   const spinner = document.getElementById('progress-spinner');
   const text    = document.getElementById('progress-text');
+  const fill    = document.getElementById('progress-bar-fill');
+  const pctEl   = document.getElementById('progress-pct');
+  const etaEl   = document.getElementById('progress-eta');
 
-  const boxClass = { done: ' progress-done', error: ' progress-error', cancelled: ' progress-cancelled' };
+  const boxClass  = { done: ' progress-done', error: ' progress-error', cancelled: ' progress-cancelled' };
   const spinClass = { done: ' done', error: ' error', cancelled: ' cancelled' };
+  const fillClass = { done: ' done', error: ' error' };
 
   box.className     = 'progress-box' + (boxClass[status] || '');
   spinner.className = 'spinner' + (spinClass[status] || '');
+  fill.className    = 'progress-bar-fill' + (fillClass[status] || '');
   text.textContent  = message;
+
+  const pct = status === 'done' ? 100 : (percent || 0);
+  fill.style.width = pct + '%';
+  pctEl.textContent = '%' + pct;
+  etaEl.textContent = etaSec != null && etaSec > 0 ? '~' + fmtEta(etaSec) + ' kaldı' : '';
+}
+
+function fmtEta(sec) {
+  if (sec >= 3600) {
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    return `${h}s ${m}d`;
+  }
+  if (sec >= 60) {
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    return `${m}d ${String(s).padStart(2,'0')}sn`;
+  }
+  return `${sec}sn`;
 }
 
 async function cancelJob() {

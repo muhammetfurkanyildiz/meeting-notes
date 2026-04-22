@@ -18,10 +18,25 @@ from __future__ import annotations
 
 import logging
 import shutil
+import time as _time
 import traceback
 import uuid
 from pathlib import Path
 from typing import Literal
+
+# Her adımın tamamlandığında ulaşılan yüzde (GPU H100/H200 için ağırlıklar)
+# Ses (Whisper+pyannote) en ağır, VLM frame sayısına göre değişir
+_STEP_PCT = {
+    "start":  2,
+    "audio":  5,   # çalışıyor
+    "frames": 40,  # audio bitti
+    "vlm":    52,  # frames bitti
+    "merge":  80,  # vlm bitti
+    "notes":  82,  # merge bitti
+    "pdf":    97,  # notes bitti
+    "db":     99,  # pdf bitti
+    "done":   100,
+}
 
 from fastapi import FastAPI, BackgroundTasks, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
@@ -82,15 +97,32 @@ class JobCancelledError(Exception):
 
 class Job:
     def __init__(self):
-        self.status:     JobStatus = "processing"
-        self.progress:   str       = "Başlatılıyor…"
-        self.meeting_id: int | None = None
-        self.error:      str | None = None
-        self.cancelled:  bool      = False
+        self.status:          JobStatus  = "processing"
+        self.progress:        str        = "Başlatılıyor…"
+        self.meeting_id:      int | None = None
+        self.error:           str | None = None
+        self.cancelled:       bool       = False
+        self.percent:         int        = 0
+        self.eta_seconds:     int | None = None
+        self._started_at:     float      = _time.monotonic()
+        self._video_duration: float      = 0.0
 
     def check_cancelled(self) -> None:
         if self.cancelled:
             raise JobCancelledError("İş kullanıcı tarafından iptal edildi.")
+
+    def set_step(self, step: str, message: str) -> None:
+        self.progress = message
+        self.percent  = _STEP_PCT.get(step, self.percent)
+        elapsed = _time.monotonic() - self._started_at
+        pct = self.percent
+        if pct > 5 and elapsed > 0:
+            self.eta_seconds = int(elapsed / pct * (100 - pct))
+        elif self._video_duration > 0:
+            # Henüz yeterli veri yok — video süresine göre kaba tahmin
+            # H100/H200 için yaklaşık: ses*0.1 + VLM dominant + sabit overhead
+            est = self._video_duration * 1.3 + 90
+            self.eta_seconds = int(est)
 
 jobs: dict[str, Job] = {}
 
@@ -110,10 +142,12 @@ class YoutubeRequest(BaseModel):
 
 
 class StatusResponse(BaseModel):
-    status:     str
-    progress:   str
-    meeting_id: int | None = None
-    error:      str | None = None
+    status:      str
+    progress:    str
+    meeting_id:  int | None = None
+    error:       str | None = None
+    percent:     int        = 0
+    eta_seconds: int | None = None
 
 
 # ── Pipeline çalıştırıcı ──────────────────────────────────────────────────────
@@ -125,10 +159,13 @@ def _run_pipeline(job: Job, job_id: str, video_input, source_type: str, source_u
     Herhangi bir hata job.status = "error" yapar ve durur.
     İptal isteği gelirse adımlar arasında JobCancelledError fırlatılır.
     """
+    job._video_duration = video_input.duration
+    job.set_step("start", "Başlatılıyor…")
+
     try:
         # ── 1. Ses transkripti + konuşmacı ayrıştırma ────────────────────────
         job.check_cancelled()
-        job.progress = "Ses transkripti ve konuşmacı analizi yapılıyor…"
+        job.set_step("audio", "Ses transkripti ve konuşmacı analizi yapılıyor…")
         logger.info("[%s] %s", id(job), job.progress)
         annotated_segments = audio_processor.process(video_input)
 
@@ -137,27 +174,27 @@ def _run_pipeline(job: Job, job_id: str, video_input, source_type: str, source_u
 
         # ── 2. Görüntü analizi ────────────────────────────────────────────────
         job.check_cancelled()
-        job.progress = "Görüntüler analiz ediliyor…"
+        job.set_step("frames", "Görüntüler analiz ediliyor…")
         logger.info("[%s] %s", id(job), job.progress)
         frame_results = frame_processor.process(video_input)
         frame_processor.unload_models()
 
         # ── 3. VLM ekran açıklamaları ─────────────────────────────────────────
         job.check_cancelled()
-        job.progress = "Ekranlar yorumlanıyor (VLM)…"
+        job.set_step("vlm", "Ekranlar yorumlanıyor (VLM)…")
         logger.info("[%s] %s", id(job), job.progress)
         vlm_results = vlm_processor.process(frame_results)
         vlm_processor.unload_models()
 
         # ── 4. Birleştirme ────────────────────────────────────────────────────
         job.check_cancelled()
-        job.progress = "Ses ve görüntü birleştiriliyor…"
+        job.set_step("merge", "Ses ve görüntü birleştiriliyor…")
         logger.info("[%s] %s", id(job), job.progress)
         merged_items = merger.merge(annotated_segments, vlm_results)
 
         # ── 5. Not üretimi ────────────────────────────────────────────────────
         job.check_cancelled()
-        job.progress = "Notlar üretiliyor (Mistral)…"
+        job.set_step("notes", "Notlar üretiliyor (Mistral)…")
         logger.info("[%s] %s", id(job), job.progress)
         notes = note_generator.generate(
             items=merged_items,
@@ -168,14 +205,14 @@ def _run_pipeline(job: Job, job_id: str, video_input, source_type: str, source_u
 
         # ── 6. PDF ────────────────────────────────────────────────────────────
         job.check_cancelled()
-        job.progress = "PDF oluşturuluyor…"
+        job.set_step("pdf", "PDF oluşturuluyor…")
         logger.info("[%s] %s", id(job), job.progress)
         pdf_filename = f"{uuid.uuid4().hex[:8]}_{_safe_stem(video_input.title)}.pdf"
         pdf_path     = str(config.OUTPUT_DIR / pdf_filename)
         pdf_generator.generate(notes, pdf_path)
 
         # ── 7. Veritabanı ─────────────────────────────────────────────────────
-        job.progress = "Arşive kaydediliyor…"
+        job.set_step("db", "Arşive kaydediliyor…")
         meeting_id = save_meeting(
             notes=notes,
             pdf_path=pdf_path,
@@ -185,7 +222,8 @@ def _run_pipeline(job: Job, job_id: str, video_input, source_type: str, source_u
 
         job.meeting_id = meeting_id
         job.status     = "done"
-        job.progress   = "Tamamlandı"
+        job.set_step("done", "Tamamlandı")
+        job.eta_seconds = 0
         update_job(job_id, "done", "Tamamlandı", meeting_id=meeting_id)
         logger.info("[%s] Pipeline tamamlandı — meeting_id=%d", id(job), meeting_id)
 
@@ -328,6 +366,8 @@ def job_status(job_id: str):
             progress=job.progress,
             meeting_id=job.meeting_id,
             error=job.error,
+            percent=job.percent,
+            eta_seconds=job.eta_seconds,
         )
     # Sunucu yeniden başlatılmış olabilir — DB'den kontrol et
     db_job = get_job_status(job_id)
@@ -338,6 +378,7 @@ def job_status(job_id: str):
         progress=db_job["progress"],
         meeting_id=db_job.get("meeting_id"),
         error=db_job.get("error"),
+        percent=100 if db_job["status"] == "done" else 0,
     )
 
 
