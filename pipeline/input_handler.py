@@ -48,9 +48,11 @@ class VideoInput:
     audio_path: str                          # ayrıştırılmış .wav (mono, 16 kHz)
     source_type: Literal["file", "youtube"]
     title: str
-    duration: float                          # saniye cinsinden
+    duration: float                          # saniye cinsinden (clip varsa clip süresi)
     existing_transcript: str | None = None  # YouTube altyazısı varsa ham metin
     metadata: dict = field(default_factory=dict)  # ek bilgiler (uploader, url, …)
+    clip_start: float = 0.0                  # orijinal videodaki başlangıç (sn)
+    clip_end: float | None = None            # orijinal videodaki bitiş (sn), None → sona kadar
 
 
 # ── Hata sınıfları ────────────────────────────────────────────────────────────
@@ -77,7 +79,11 @@ class AudioExtractionError(InputHandlerError):
 
 # ── Ana arayüz fonksiyonları ──────────────────────────────────────────────────
 
-def handle_file(file_path: str | Path) -> VideoInput:
+def handle_file(
+    file_path: str | Path,
+    start_time: float | None = None,
+    end_time: float | None = None,
+) -> VideoInput:
     """
     Yerel bir video dosyasını alır, doğrular ve VideoInput döner.
 
@@ -85,6 +91,10 @@ def handle_file(file_path: str | Path) -> VideoInput:
     ----------
     file_path:
         İşlenecek video dosyasının yolu.
+    start_time:
+        Klip başlangıcı (saniye). None → videonun başından.
+    end_time:
+        Klip bitişi (saniye). None → videonun sonuna kadar.
 
     Raises
     ------
@@ -127,16 +137,22 @@ def handle_file(file_path: str | Path) -> VideoInput:
         logger.debug("Aynı isimde dosya zaten mevcut, kopyalanmadı.")
 
     # ── Süre ve başlık ───────────────────────────────────────────────────────
-    duration = _probe_duration(dest_path)
+    full_duration = _probe_duration(dest_path)
+    clip_start = float(start_time) if start_time is not None else 0.0
+    clip_end   = float(end_time)   if end_time   is not None else None
+    _validate_clip_range(clip_start, clip_end, full_duration)
+    clip_duration = (clip_end if clip_end is not None else full_duration) - clip_start
     title = path.stem
 
     # ── Ses ayırma ────────────────────────────────────────────────────────────
-    audio_path = _extract_audio(dest_path)
+    audio_path = _extract_audio(dest_path, clip_start, clip_end)
 
     logger.info(
-        "Dosya hazır — başlık: '%s', süre: %s",
+        "Dosya hazır — başlık: '%s', süre: %s%s",
         title,
-        _fmt_duration(duration),
+        _fmt_duration(clip_duration),
+        f" (klip: {_fmt_duration(clip_start)} – {_fmt_duration(clip_end or full_duration)})"
+        if clip_start or clip_end else "",
     )
 
     return VideoInput(
@@ -144,11 +160,17 @@ def handle_file(file_path: str | Path) -> VideoInput:
         audio_path=str(audio_path),
         source_type="file",
         title=title,
-        duration=duration,
+        duration=clip_duration,
+        clip_start=clip_start,
+        clip_end=clip_end,
     )
 
 
-def handle_youtube(url: str) -> VideoInput:
+def handle_youtube(
+    url: str,
+    start_time: float | None = None,
+    end_time: float | None = None,
+) -> VideoInput:
     """
     YouTube URL'sini indirir, varsa otomatik altyazıyı da alır ve VideoInput döner.
 
@@ -156,6 +178,10 @@ def handle_youtube(url: str) -> VideoInput:
     ----------
     url:
         YouTube video URL'si.
+    start_time:
+        Klip başlangıcı (saniye). None → videonun başından.
+    end_time:
+        Klip bitişi (saniye). None → videonun sonuna kadar.
 
     Raises
     ------
@@ -175,20 +201,27 @@ def handle_youtube(url: str) -> VideoInput:
     out_dir  = config.UPLOAD_DIR / f"yt_{job_id}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    video_path, title, duration, metadata = _download_video(url, out_dir)
-    transcript                            = _download_transcript(url, out_dir)
+    video_path, title, full_duration, metadata = _download_video(url, out_dir)
+    transcript                                 = _download_transcript(url, out_dir)
 
     if transcript:
         logger.info("Otomatik altyazı bulundu ve indirildi (%d karakter).", len(transcript))
     else:
         logger.info("Otomatik altyazı bulunamadı; Whisper ile transkript oluşturulacak.")
 
-    audio_path = _extract_audio(video_path)
+    clip_start = float(start_time) if start_time is not None else 0.0
+    clip_end   = float(end_time)   if end_time   is not None else None
+    _validate_clip_range(clip_start, clip_end, full_duration)
+    clip_duration = (clip_end if clip_end is not None else full_duration) - clip_start
+
+    audio_path = _extract_audio(video_path, clip_start, clip_end)
 
     logger.info(
-        "YouTube videosu hazır — başlık: '%s', süre: %s",
+        "YouTube videosu hazır — başlık: '%s', süre: %s%s",
         title,
-        _fmt_duration(duration),
+        _fmt_duration(clip_duration),
+        f" (klip: {_fmt_duration(clip_start)} – {_fmt_duration(clip_end or full_duration)})"
+        if clip_start or clip_end else "",
     )
 
     return VideoInput(
@@ -196,9 +229,11 @@ def handle_youtube(url: str) -> VideoInput:
         audio_path=str(audio_path),
         source_type="youtube",
         title=title,
-        duration=duration,
+        duration=clip_duration,
         existing_transcript=transcript,
         metadata=metadata,
+        clip_start=clip_start,
+        clip_end=clip_end,
     )
 
 
@@ -229,12 +264,45 @@ def _probe_duration(video_path: Path) -> float:
         ) from exc
 
 
-def _extract_audio(video_path: Path) -> Path:
+def _validate_clip_range(start: float, end: float | None, duration: float) -> None:
+    """Klip aralığının geçerli olduğunu doğrular; değilse InputHandlerError fırlatır."""
+    if start < 0:
+        raise InputHandlerError(f"Başlangıç zamanı negatif olamaz: {start}")
+    if start >= duration:
+        raise InputHandlerError(
+            f"Başlangıç zamanı ({_fmt_duration(start)}) video süresini "
+            f"({_fmt_duration(duration)}) aşıyor."
+        )
+    if end is not None:
+        if end <= start:
+            raise InputHandlerError(
+                f"Bitiş zamanı ({_fmt_duration(end)}) başlangıç zamanından "
+                f"({_fmt_duration(start)}) büyük olmalıdır."
+            )
+        if end > duration:
+            raise InputHandlerError(
+                f"Bitiş zamanı ({_fmt_duration(end)}) video süresini "
+                f"({_fmt_duration(duration)}) aşıyor."
+            )
+
+
+def _extract_audio(
+    video_path: Path,
+    start_time: float = 0.0,
+    end_time: float | None = None,
+) -> Path:
     """
     ffmpeg ile video dosyasından mono 16 kHz WAV ses dosyası üretir.
+    start_time/end_time belirtilirse yalnızca o aralık çıkarılır.
     Çıktı workdir/ altına kaydedilir.
     """
-    audio_path = config.WORK_DIR / (video_path.stem + "_audio.wav")
+    # Klip parametrelerine göre benzersiz dosya adı
+    suffix = ""
+    if start_time or end_time is not None:
+        s = int(start_time)
+        e = int(end_time) if end_time is not None else "end"
+        suffix = f"_{s}_{e}"
+    audio_path = config.WORK_DIR / f"{video_path.stem}_audio{suffix}.wav"
 
     if audio_path.exists():
         logger.debug("Ses dosyası zaten mevcut, yeniden oluşturulmadı: %s", audio_path.name)
@@ -242,22 +310,29 @@ def _extract_audio(video_path: Path) -> Path:
 
     logger.info("Ses track'i ayrıştırılıyor → %s", audio_path.name)
 
+    # Hızlı seek: -ss input'tan önce verilirse doğrudan istenen konuma atlar
+    input_kwargs: dict = {}
+    output_kwargs: dict = {
+        "ac": 1,               # mono
+        "ar": 16000,           # 16 kHz (Whisper için ideal)
+        "acodec": "pcm_s16le",
+        "vn": None,            # video stream'i dahil etme
+    }
+    if start_time:
+        input_kwargs["ss"] = start_time
+    if end_time is not None:
+        # -t: başlangıçtan itibaren süre (end - start)
+        output_kwargs["t"] = end_time - start_time
+
     try:
         (
             ffmpeg
-            .input(str(video_path))
-            .output(
-                str(audio_path),
-                ac=1,          # mono
-                ar=16000,      # 16 kHz  (Whisper için ideal)
-                acodec="pcm_s16le",
-                vn=None,       # video stream'i dahil etme
-            )
+            .input(str(video_path), **input_kwargs)
+            .output(str(audio_path), **output_kwargs)
             .overwrite_output()
             .run(quiet=True)
         )
     except ffmpeg.Error as exc:
-        # Geçici yarım dosyayı temizle
         audio_path.unlink(missing_ok=True)
         raise AudioExtractionError(
             f"Ses ayırma başarısız ({video_path.name}): {exc.stderr.decode(errors='replace')}"

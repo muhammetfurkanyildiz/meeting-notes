@@ -39,7 +39,7 @@ _STEP_PCT = {
     "done":   100,
 }
 
-from fastapi import FastAPI, BackgroundTasks, HTTPException, UploadFile, File
+from fastapi import FastAPI, BackgroundTasks, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -140,6 +140,8 @@ def _new_job() -> tuple[str, Job]:
 
 class YoutubeRequest(BaseModel):
     url: str
+    start_time: float | None = None   # saniye; None → videonun başından
+    end_time:   float | None = None   # saniye; None → videonun sonuna kadar
 
 
 class StatusResponse(BaseModel):
@@ -287,6 +289,8 @@ def root():
 async def process_file(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
+    start_time: float | None = Form(None),
+    end_time:   float | None = Form(None),
 ):
     """
     Video dosyasını yükler ve pipeline'ı arka planda başlatır.
@@ -327,7 +331,11 @@ async def process_file(
 
     def _task():
         try:
-            video_input = input_handler.handle_file(tmp_path)
+            video_input = input_handler.handle_file(
+                tmp_path,
+                start_time=start_time,
+                end_time=end_time,
+            )
             _run_pipeline(job, job_id, video_input, source_type="file")
         except Exception as exc:
             job.status = "error"
@@ -336,7 +344,11 @@ async def process_file(
             logger.error("Dosya pipeline başlatılamadı: %s", exc)
 
     background_tasks.add_task(_task)
-    logger.info("Dosya işi başlatıldı: job_id=%s", job_id)
+    logger.info(
+        "Dosya işi başlatıldı: job_id=%s%s",
+        job_id,
+        f" (klip: {start_time}s – {end_time}s)" if start_time is not None or end_time is not None else "",
+    )
     return {"job_id": job_id}
 
 
@@ -356,7 +368,11 @@ def process_youtube(
 
     def _task():
         try:
-            video_input = input_handler.handle_youtube(url)
+            video_input = input_handler.handle_youtube(
+                url,
+                start_time=body.start_time,
+                end_time=body.end_time,
+            )
             _run_pipeline(job, job_id, video_input, source_type="youtube", source_url=url)
         except Exception as exc:
             job.status = "error"
@@ -365,7 +381,13 @@ def process_youtube(
             logger.error("YouTube pipeline başlatılamadı: %s", exc)
 
     background_tasks.add_task(_task)
-    logger.info("YouTube işi başlatıldı: job_id=%s, url=%s", job_id, url)
+    logger.info(
+        "YouTube işi başlatıldı: job_id=%s, url=%s%s",
+        job_id,
+        url,
+        f" (klip: {body.start_time}s – {body.end_time}s)"
+        if body.start_time is not None or body.end_time is not None else "",
+    )
     return {"job_id": job_id}
 
 

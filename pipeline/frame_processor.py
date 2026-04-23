@@ -206,11 +206,15 @@ def process(video_input: VideoInput) -> list[FrameResult]:
     if not video_path.exists():
         raise VideoReadError(f"Video dosyası bulunamadı: {video_path}")
 
+    clip_start = getattr(video_input, "clip_start", 0.0) or 0.0
+    clip_end   = getattr(video_input, "clip_end",   None)
+
     logger.info(
-        "Frame işleme başlıyor: '%s' (%.0f sn, ~%.0f frame örneklenecek)",
+        "Frame işleme başlıyor: '%s' (%.0f sn, ~%.0f frame örneklenecek%s)",
         video_input.title,
         video_input.duration,
         video_input.duration / config.FRAME_SAMPLE_INTERVAL,
+        f", klip: {clip_start:.0f}s–{clip_end:.0f}s" if clip_start or clip_end else "",
     )
 
     # Prompt embedding'lerini ön-ısıt; model burada yüklenir
@@ -228,7 +232,7 @@ def process(video_input: VideoInput) -> list[FrameResult]:
     }
 
     try:
-        results = _process_frames(cap, video_path, stats)
+        results = _process_frames(cap, video_path, stats, clip_start, clip_end)
     finally:
         cap.release()
 
@@ -251,26 +255,37 @@ def _process_frames(
     cap: cv2.VideoCapture,
     video_path: Path,
     stats: dict,
+    clip_start: float = 0.0,
+    clip_end: float | None = None,
 ) -> list[FrameResult]:
     """
     Frame okuma + süzgeç + kaydetme döngüsü.
     stats dict'i in-place günceller.
+    clip_start/clip_end orijinal videodaki sınırlardır.
+    Timestamp'ler clip_start'a göre sıfırlanır (0-tabanlı).
     """
     fps          = cap.get(cv2.CAP_PROP_FPS) or 25.0
     interval_frames = max(1, int(round(fps * config.FRAME_SAMPLE_INTERVAL)))
 
+    start_frame = int(clip_start * fps) if clip_start else 0
+    end_frame   = int(clip_end   * fps) if clip_end   is not None else None
+
     prev_emb: torch.Tensor | None = None
     results: list[FrameResult]    = []
-    frame_idx = 0
+    frame_idx = start_frame
 
     while True:
+        if end_frame is not None and frame_idx >= end_frame:
+            break
+
         # Sadece örnekleme aralığındaki frame'leri oku; araları atla
         cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
         ok, bgr = cap.read()
         if not ok:
             break
 
-        timestamp = frame_idx / fps
+        # Timestamp'i clip_start'a göre sıfırla (ses ile senkron kalır)
+        timestamp = (frame_idx / fps) - clip_start
         frame_idx += interval_frames
         stats["total_sampled"] += 1
 

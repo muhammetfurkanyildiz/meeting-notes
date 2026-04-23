@@ -271,6 +271,36 @@
   }
   .empty-state .empty-icon { font-size: 2.5rem; display: block; margin-bottom: .5rem; }
 
+  /* ── Klip aralığı ── */
+  .clip-toggle { margin-top: 1rem; display: flex; align-items: center; gap: .5rem; cursor: pointer; user-select: none; font-size: .88rem; color: var(--muted); }
+  .clip-toggle input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
+  .clip-range {
+    display: none;
+    margin-top: .75rem;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: .85rem 1rem;
+    gap: 1rem;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .clip-range.visible { display: flex; }
+  .clip-range label { font-size: .82rem; font-weight: 600; color: var(--muted); white-space: nowrap; }
+  .clip-range input[type=text] {
+    width: 90px;
+    padding: .45rem .65rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: .9rem;
+    font-family: monospace;
+    outline: none;
+    text-align: center;
+  }
+  .clip-range input[type=text]:focus { border-color: var(--accent); }
+  .clip-range .clip-sep { color: var(--muted); font-size: 1rem; }
+  .clip-hint { font-size: .75rem; color: var(--muted); margin-top: .4rem; display: block; }
+
   /* ── Utility ── */
   .hidden { display: none !important; }
 </style>
@@ -307,6 +337,18 @@
         <div class="dz-hint">.mp4 · .mkv · .avi · .webm — max 2 GB</div>
         <div class="dz-filename" id="dz-filename"></div>
       </div>
+      <label class="clip-toggle">
+        <input type="checkbox" id="file-clip-toggle" onchange="toggleClip('file')">
+        Belirli bir aralık seç
+      </label>
+      <div class="clip-range" id="file-clip-range">
+        <label>Başlangıç</label>
+        <input type="text" id="file-start" placeholder="0:00:00" value="">
+        <span class="clip-sep">→</span>
+        <label>Bitiş</label>
+        <input type="text" id="file-end" placeholder="0:02:00" value="">
+        <span class="clip-hint">Saat:Dakika:Saniye veya sadece saniye (örn. 90)</span>
+      </div>
     </div>
 
     <!-- YouTube sekmesi -->
@@ -314,6 +356,18 @@
       <div class="input-group">
         <label for="yt-url">YouTube URL</label>
         <input type="text" id="yt-url" placeholder="https://www.youtube.com/watch?v=...">
+      </div>
+      <label class="clip-toggle">
+        <input type="checkbox" id="yt-clip-toggle" onchange="toggleClip('yt')">
+        Belirli bir aralık seç
+      </label>
+      <div class="clip-range" id="yt-clip-range">
+        <label>Başlangıç</label>
+        <input type="text" id="yt-start" placeholder="0:00:00" value="">
+        <span class="clip-sep">→</span>
+        <label>Bitiş</label>
+        <input type="text" id="yt-end" placeholder="0:02:00" value="">
+        <span class="clip-hint">Saat:Dakika:Saniye veya sadece saniye (örn. 90)</span>
       </div>
     </div>
 
@@ -390,6 +444,37 @@ function switchTab(tab) {
 }
 
 // ══════════════════════════════════════════════════════
+// Klip aralığı toggle
+// ══════════════════════════════════════════════════════
+function toggleClip(prefix) {
+  const checked = document.getElementById(prefix + '-clip-toggle').checked;
+  document.getElementById(prefix + '-clip-range').classList.toggle('visible', checked);
+}
+
+// "1:23:45" veya "90" → saniye (float). Geçersizse null döner.
+function parseTime(val) {
+  if (!val || !val.trim()) return null;
+  val = val.trim();
+  // Sadece sayı
+  if (/^\d+(\.\d+)?$/.test(val)) return parseFloat(val);
+  // SS veya MM:SS veya HH:MM:SS
+  const parts = val.split(':').map(Number);
+  if (parts.some(isNaN)) return null;
+  if (parts.length === 1) return parts[0];
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  return null;
+}
+
+function getClipTimes(prefix) {
+  const enabled = document.getElementById(prefix + '-clip-toggle').checked;
+  if (!enabled) return { start_time: null, end_time: null };
+  const start = parseTime(document.getElementById(prefix + '-start').value);
+  const end   = parseTime(document.getElementById(prefix + '-end').value);
+  return { start_time: start, end_time: end };
+}
+
+// ══════════════════════════════════════════════════════
 // Drag-drop
 // ══════════════════════════════════════════════════════
 const dropzone  = document.getElementById('dropzone');
@@ -454,8 +539,12 @@ async function submitFile() {
   const file = fileInput.files[0];
   if (!file) throw new Error('Lütfen bir video dosyası seçin.');
 
+  const { start_time, end_time } = getClipTimes('file');
+
   const form = new FormData();
   form.append('file', file);
+  if (start_time !== null) form.append('start_time', start_time);
+  if (end_time   !== null) form.append('end_time',   end_time);
 
   const res  = await fetch('/api/process/file', { method: 'POST', body: form });
   const data = await res.json();
@@ -469,10 +558,12 @@ async function submitYoutube() {
   const url = document.getElementById('yt-url').value.trim();
   if (!url) throw new Error('Lütfen bir YouTube URL\'si girin.');
 
+  const { start_time, end_time } = getClipTimes('yt');
+
   const res  = await fetch('/api/process/youtube', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url }),
+    body: JSON.stringify({ url, start_time, end_time }),
   });
   const data = await res.json();
   if (!res.ok) throw new Error(data.detail || 'Sunucu hatası');
