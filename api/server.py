@@ -16,6 +16,7 @@ Endpoint'ler:
 
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 import logging
 import shutil
@@ -84,9 +85,24 @@ app.mount("/static", StaticFiles(directory=str(config.STATIC_DIR)), name="static
 
 
 @app.on_event("startup")
-def startup() -> None:
+async def startup() -> None:
     init_db()
     logger.info("Uygulama başlatıldı. http://%s:%d", config.API_HOST, config.API_PORT)
+    asyncio.create_task(_warmup_models())
+
+
+async def _warmup_models() -> None:
+    """Whisper ve CLIP modellerini arka planda önceden yükler."""
+    try:
+        loop = asyncio.get_event_loop()
+        logger.info("Modeller ısıtılıyor (arka plan)…")
+        from pipeline.audio_processor import _get_whisper
+        from pipeline.frame_processor import _get_clip
+        await loop.run_in_executor(None, _get_whisper)
+        await loop.run_in_executor(None, _get_clip)
+        logger.info("Modeller hazır.")
+    except Exception as exc:
+        logger.warning("Warmup hatası (önemsiz, ilk istekte yüklenir): %s", exc)
 
 
 # ── In-memory job takibi ──────────────────────────────────────────────────────
